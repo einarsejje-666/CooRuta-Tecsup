@@ -1,0 +1,56 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Pruebas de reglas (Firebase Emulator): dependencias, registros y temporales.
+# package-lock.json sí se versiona.
+node_modules/
+firebase-debug*.log
+firestore-debug*.log
+database-debug*.log
+ui-debug*.log
+pubsub-debug*.log
+.firebase/
+*.tmp
+
+# Respaldos manuales previos a cada bloque (no se versionan).
+_respaldo/
+
+# Clave privada de subida a Google Play.
+/release-signing/
+
+# --- Repositorio publico: secretos y archivos que no son codigo ---
+/app/google-services.json
+*.jks
+*.keystore
+.env
+.env.*
+*service-account*.json
+.kotlin/
+.fuse_hidden*
+*.log
+*.diff
+*.pptx
+/docs/
+/evidencias/
+/Material_informe_CooRuta/
+/Claude outputs/
+/.claude/
+/.agents/
+skills-lock.json
+*.apk
+*.aab
+/app/release/
+/app/debug/
