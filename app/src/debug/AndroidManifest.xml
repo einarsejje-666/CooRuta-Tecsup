@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Solo debug. Firebase se inicializa en iniciarFirebase() (src/debug/.../Emuladores.kt) para poder
+     usar el proyecto demo-cooruta con los emuladores; release conserva la inicialización automática. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- Android 17+ (targetSdk 37): conectar con los emuladores del equipo es acceso a la red local. -->
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
+    <application android:networkSecurityConfig="@xml/red_emuladores">
+        <provider
+            android:name="com.google.firebase.provider.FirebaseInitProvider"
+            android:authorities="${applicationId}.firebaseinitprovider"
+            tools:node="remove" />
+    </application>
+</manifest>

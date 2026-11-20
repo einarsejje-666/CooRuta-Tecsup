@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Archivos que CooRuta comparte con el instalador de Android (APK de actualización). -->
+<paths>
+    <cache-path name="actualizacion" path="actualizacion/" />
+</paths>
