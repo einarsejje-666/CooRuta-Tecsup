@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Invitación a CooRuta</title>
+<meta name="description" content="Te invitaron a un grupo de CooRuta para compartir viajes en Arequipa.">
+<meta property="og:title" content="Te invitaron a CooRuta">
+<meta property="og:description" content="Únete al grupo de un conductor para compartir viajes en Arequipa.">
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+         background: #0A0D14; color: #fff; font-family: Roboto, system-ui, sans-serif; }
+  main { width: min(420px, calc(100% - 32px)); text-align: center; }
+  .tarjeta { background: #121212; border: 1px solid #2A2A2A; border-radius: 22px; padding: 28px 22px; }
+  h1 { font-size: 24px; margin: 0 0 8px; }
+  p { color: #9AA4B8; line-height: 1.5; margin: 0 0 20px; }
+  a.boton { display: block; padding: 16px; border-radius: 16px; font-weight: 700; text-decoration: none;
+            color: #fff; background: linear-gradient(90deg, #7189FF, #556FF7, #3F55D9); }
+  .codigo { margin-top: 18px; font-size: 13px; color: #9AA4B8; }
+  .codigo b { color: #fff; letter-spacing: 2px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="tarjeta">
+    <h1>Te invitaron a CooRuta</h1>
+    <p>Un conductor te invita a su grupo para compartir viajes. Abre la invitación en la app para unirte.</p>
+    <a class="boton" id="abrir" href="#">Abrir en CooRuta</a>
+    <div class="codigo">Código: <b id="codigo">—</b></div>
+    <p style="margin-top:18px;font-size:13px">¿No tienes la app? Pídele el instalador a quien te invitó y vuelve a abrir este enlace.</p>
+  </div>
+</main>
+<script>
+  // /i/ABCD2345 → ABCD2345. Abre la app con su esquema propio (si está instalada).
+  var codigo = (location.pathname.split('/i/')[1] || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 8);
+  document.getElementById('codigo').textContent = codigo || '—';
+  var destino = 'intent://i/' + codigo + '#Intent;scheme=cooruta;package=pe.cooruta.app;end';
+  document.getElementById('abrir').href = codigo ? destino : '#';
+  if (codigo && /Android/i.test(navigator.userAgent)) setTimeout(function () { location.href = destino; }, 300);
+</script>
+</body>
+</html>
