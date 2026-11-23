@@ -1,0 +1,615 @@
+rules_version = '2';
+
+// Reglas de seguridad de Firestore para CooRuta.
+// Se copian en la consola de Firebase: Firestore Database → Reglas → Publicar.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Comunidad voluntaria. Empresas e invitaciones las provisiona un operador confiable.
+    // No se otorgan permisos sobre reservas, rutasPrivadas ni ubicaciones de viajes.
+    function empresaActiva(id) {
+      return get(/databases/$(database)/documents/empresas/$(id)).data.activa == true;
+    }
+    function miEmpresa() {
+      return get(/databases/$(database)/documents/miembrosEmpresa/$(request.auth.uid)).data.empresaId;
+    }
+    // Versión vigente de la app (actualización obligatoria): lectura pública, se edita solo en la consola.
+    match /config/{doc} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /empresas/{id} {
+      allow get: if autenticado() && (
+        (exists(/databases/$(database)/documents/miembrosEmpresa/$(request.auth.uid)) && miEmpresa() == id)
+        || (exists(/databases/$(database)/documents/invitacionesEmpresa/$(request.auth.uid))
+          && get(/databases/$(database)/documents/invitacionesEmpresa/$(request.auth.uid)).data.empresaId == id));
+      allow list, write: if false;
+    }
+    match /invitacionesEmpresa/{uid} {
+      allow get, delete: if autenticado() && request.auth.uid == uid;
+      allow list, create, update: if false;
+    }
+    match /miembrosEmpresa/{uid} {
+      allow get: if autenticado() && (request.auth.uid == uid ||
+        (resource.data.empresaId == miEmpresa() && empresaActiva(miEmpresa())));
+      // La consulta debe filtrar por la empresa del solicitante; solo expone uid, empresa y fecha.
+      allow list: if autenticado() && resource.data.empresaId == miEmpresa() && empresaActiva(miEmpresa());
+      allow create: if autenticado() && request.auth.uid == uid
+        && request.resource.data.keys().hasAll(['empresaId', 'unidoEn'])
+        && request.resource.data.keys().hasOnly(['empresaId', 'unidoEn'])
+        && request.resource.data.empresaId is string
+        && request.resource.data.unidoEn == request.time
+        && get(/databases/$(database)/documents/invitacionesEmpresa/$(uid)).data.empresaId == request.resource.data.empresaId
+        && get(/databases/$(database)/documents/invitacionesEmpresa/$(uid)).data.venceEn > request.time
+        && !existsAfter(/databases/$(database)/documents/invitacionesEmpresa/$(uid))
+        && empresaActiva(request.resource.data.empresaId);
+      allow update: if false;
+      allow delete: if autenticado() && request.auth.uid == uid;
+    }
+
+    function autenticado() { return request.auth != null; }
+    // Comunidad de quien pide, deducida del correo verificado de su cuenta (no de lo que diga la app).
+    function esDeTecsup() {
+      return request.auth.token.get('email', '').lower().matches('.*@tecsup[.]edu[.]pe$')
+          && request.auth.token.get('email_verified', false) == true;
+    }
+    // c es la comunidad de un documento: solo la ve (o la escribe) quien pertenece a ella.
+    function comunidadVisible(c) { return (esDeTecsup() && c == 'tecsup') || (!esDeTecsup() && c == 'externa'); }
+    function cambios() { return request.resource.data.diff(resource.data).affectedKeys(); }
+    // Hoy en Lima (UTC−5, sin horario de verano) como "yyyy-MM-dd", igual que la app.
+    function hoy() {
+      let t = request.time - duration.value(5, 'h');
+      return string(t.year()) + '-' + string(100 + t.month()).replace('^1', '')
+             + '-' + string(100 + t.day()).replace('^1', '');
+    }
+    function ocupados(r, fecha) { return r.get('ocupadosPorFecha', {}).get(fecha, 0); }
+
+    // Rutas de conductores. Las lee cualquier usuario con sesión, así que solo llevan lo que Buscar
+    // necesita: sin coordenadas de origen/destino ni totales de distancia, duración o pasaje (lo
+    // exacto va en rutasPrivadas). Las reglas no pueden revisar cada punto de `recorrido`: que no
+    // incluya los tramos cercanos a los extremos lo asegura la app.
+    match /rutas/{id} {
+      // Sin nombre de lugar (puede ser una dirección); solo una futura etiqueta de zona.
+      function lugarPublico(l) { return l is map && l.keys().hasOnly(['zona']); }
+      function mapaOcupados(d) { return d.get('ocupadosPorFecha', {}); }
+      function publicaValida(d) {
+        return d.keys().hasOnly(['conductorId', 'nombre', 'alias', 'origen', 'destino', 'recorrido', 'dias',
+                                 'horaSalida', 'minutoSalida', 'asientos', 'tarifaKmCentimos', 'estado',
+                                 'prueba', 'creadaEn', 'tramoPublico', 'comunidad'])
+            && lugarPublico(d.origen) && lugarPublico(d.destino)
+            && (!('recorrido' in d) || (d.recorrido is list && d.recorrido.size() <= 200));
+      }
+      // tramoPublico: "automatico" o "elegido" exigen un recorrido con al menos 2 puntos;
+      // "ninguno" (no aparece en Buscar) no publica geometría. Rutas antiguas no tienen el campo.
+      function tramoCoherente(d) {
+        return d.tramoPublico in ['automatico', 'elegido', 'completo', 'ninguno']
+            && ((d.tramoPublico == 'ninguno' && (!('recorrido' in d) || d.recorrido.size() == 0))
+                || (d.tramoPublico != 'ninguno' && 'recorrido' in d && d.recorrido is list && d.recorrido.size() >= 2));
+      }
+      function ultimaFechaValida(f) {
+        let u = resource.data.get('ultimaFechaAceptada', '');
+        return (f > u && request.resource.data.get('ultimaFechaAceptada', '') == f)
+            || (f <= u && request.resource.data.get('ultimaFechaAceptada', '') == u);
+      }
+      // La ocupación solo cambia junto con su reserva (`ultimaReserva`), en la misma escritura y
+      // solo en la fecha de esa reserva: +1 cuando el conductor acepta una pendiente (sin pasar la
+      // capacidad) y −1 cuando el pasajero cancela su reserva aceptada.
+      function movimientoOcupacion() {
+        let rid = request.resource.data.ultimaReserva;
+        let antes = get(/databases/$(database)/documents/reservas/$(rid)).data;
+        let despues = getAfter(/databases/$(database)/documents/reservas/$(rid)).data;
+        let f = antes.fecha;
+        let viejo = mapaOcupados(resource.data).get(f, 0);
+        let nuevo = mapaOcupados(request.resource.data).get(f, 0);
+        return antes.rutaId == id && despues.rutaId == id && despues.fecha == f
+            && mapaOcupados(request.resource.data).diff(mapaOcupados(resource.data)).affectedKeys().hasOnly([f])
+            && ((request.auth.uid == resource.data.conductorId
+                 && cambios().hasOnly(['ocupadosPorFecha', 'ultimaReserva', 'ultimaFechaAceptada'])
+                 && antes.estado == 'pendiente' && despues.estado == 'aceptada'
+                 && nuevo == viejo + 1 && nuevo <= resource.data.asientos
+                 && ultimaFechaValida(f))
+              || (request.auth.uid == antes.pasajeroId
+                 && cambios().hasOnly(['ocupadosPorFecha', 'ultimaReserva'])
+                 && antes.estado == 'aceptada' && despues.estado == 'cancelada'
+                 && nuevo == viejo - 1 && nuevo >= 0));
+      }
+
+      // Solo la comunidad de la ruta (el dueño siempre ve las suyas, también las antiguas sin comunidad).
+      allow read: if autenticado()
+                  && (resource.data.conductorId == request.auth.uid || comunidadVisible(resource.data.comunidad));
+      allow create: if autenticado()
+                    && request.resource.data.conductorId == request.auth.uid
+                    && publicaValida(request.resource.data)
+                    && comunidadVisible(request.resource.data.comunidad)
+                    && request.resource.data.asientos is int && request.resource.data.asientos >= 1
+                    && request.resource.data.tarifaKmCentimos == 25
+                    && request.resource.data.estado == 'activa'
+                    && tramoCoherente(request.resource.data);
+      allow update: if autenticado() && (
+          // Dueño: edita su ruta (nombre, pausa…) sin tocar ocupación ni tarifa, sin transferirla,
+          // sin bajar asientos (dejaría sobreocupación) y sin volver a publicar datos exactos.
+          (resource.data.conductorId == request.auth.uid
+            && !cambios().hasAny(['conductorId', 'ocupadosPorFecha', 'ultimaReserva', 'ultimaFechaAceptada', 'tarifaKmCentimos', 'habitualesPorDia'])
+            // La comunidad no cambia; solo se asigna a rutas antiguas que aún no la tienen.
+            && (!cambios().hasAny(['comunidad'])
+                || (!('comunidad' in resource.data) && comunidadVisible(request.resource.data.comunidad)))
+            && request.resource.data.get('asientos', 0) >= resource.data.get('asientos', 0)
+            && (!cambios().hasAny(['origen']) || lugarPublico(request.resource.data.origen))
+            && (!cambios().hasAny(['destino']) || lugarPublico(request.resource.data.destino))
+            && (!cambios().hasAny(['recorrido'])
+                || (request.resource.data.recorrido is list && request.resource.data.recorrido.size() <= 200))
+            && !request.resource.data.diff(resource.data).addedKeys()
+                  .hasAny(['distanciaMetros', 'duracionSegundos', 'pasajeCentimos', 'asientosLibres'])
+            && (!cambios().hasAny(['tramoPublico', 'recorrido']) || !('tramoPublico' in request.resource.data)
+                || tramoCoherente(request.resource.data)))
+          || movimientoOcupacion()
+        );
+      // Solo sin aceptaciones de hoy en adelante: no deja asientos ocupados sin ruta.
+      allow delete: if autenticado()
+                    && resource.data.conductorId == request.auth.uid
+                    && resource.data.get('ultimaFechaAceptada', '') < hoy();
+    }
+
+    // Datos exactos de la ruta (origen, destino, recorrido completo, totales): solo el dueño.
+    // Los pasajeros aceptados no los leen: lo que necesita el encuentro está en su reserva.
+    // Grupo del conductor. Las invitaciones y las membresías solo las escriben las funciones
+    // (crearInvitacionGrupo, aceptarInvitacionGrupo); el conductor o el integrante pueden borrarla.
+    match /invitacionesGrupo/{codigo} {
+      allow read, write: if false;
+    }
+    match /miembrosGrupo/{id} {
+      allow read: if autenticado()
+                  && (resource.data.conductorId == request.auth.uid || resource.data.miembroId == request.auth.uid);
+      allow delete: if autenticado()
+                  && (resource.data.conductorId == request.auth.uid || resource.data.miembroId == request.auth.uid);
+      allow create, update: if false;
+    }
+    // Recorrido completo de las rutas del conductor, para su grupo. Un documento por conductor;
+    // lo leen él y sus integrantes, lo escribe él.
+    match /rutasGrupo/{cid} {
+      allow get: if autenticado() && (request.auth.uid == cid
+                  || exists(/databases/$(database)/documents/miembrosGrupo/$(cid + '_' + request.auth.uid)));
+      allow list: if false;
+      allow create, update: if autenticado() && request.auth.uid == cid
+                  && request.resource.data.keys().hasOnly(['rutas', 'actualizadoEn'])
+                  && request.resource.data.rutas is map
+                  && request.resource.data.actualizadoEn == request.time;
+      allow delete: if autenticado() && request.auth.uid == cid;
+    }
+
+    match /rutasPrivadas/{id} {
+      allow read: if autenticado() && resource.data.conductorId == request.auth.uid;
+      allow create, update: if autenticado()
+                    && request.resource.data.conductorId == request.auth.uid
+                    && (resource == null || resource.data.conductorId == request.auth.uid)
+                    && getAfter(/databases/$(database)/documents/rutas/$(id)).data.conductorId == request.auth.uid;
+      // resource == null: rutas antiguas sin parte privada se borran en el mismo lote.
+      allow delete: if autenticado() && (resource == null || resource.data.conductorId == request.auth.uid);
+    }
+
+    // Aviso "hoy viajo" del pasajero: lo leen los conductores con sesión, así que solo lleva puntos
+    // aproximados (redondeados a 0,01°) sin nombres de lugar. Los de días pasados solo los ve su dueño.
+    match /pedidos/{id} {
+      function aprox(v) { return v is number && math.abs(v * 100 - math.round(v * 100)) < 0.000001; }
+      function lugarAprox(l) {
+        return l is map && l.keys().hasOnly(['latitud', 'longitud']) && aprox(l.latitud) && aprox(l.longitud);
+      }
+      allow read: if autenticado()
+                  && (resource.data.pasajeroId == request.auth.uid
+                      || (resource.data.fecha >= hoy() && comunidadVisible(resource.data.comunidad)));
+      allow create, update: if autenticado()
+                    && request.resource.data.pasajeroId == request.auth.uid
+                    && id == request.auth.uid + '_' + request.resource.data.fecha
+                    && request.resource.data.keys().hasOnly(['pasajeroId', 'nombre', 'fecha', 'origen', 'destino',
+                                                             'distanciaMetros', 'horaSalida', 'minutoSalida', 'creadaEn', 'comunidad'])
+                    && comunidadVisible(request.resource.data.comunidad)
+                    && lugarAprox(request.resource.data.origen) && lugarAprox(request.resource.data.destino);
+      allow delete: if autenticado() && resource.data.pasajeroId == request.auth.uid;
+    }
+
+    // Solicitud de asiento. Estados: pendiente → aceptada | rechazada | cancelada;
+    // aceptada → cancelada (pasajero, libera el asiento); rechazada | cancelada → pendiente.
+    // Identidad, ruta, fecha y precio no cambian nunca.
+    // Id fijo "<rutaId>_<pasajeroId>_<fecha>": una sola solicitud por ruta, pasajero y día.
+    // Fechas: hoy o futuras se pueden pedir, aceptar, reabrir o cancelar si estaban aceptadas;
+    // las pasadas solo se leen, cancelan (si estaban pendientes) o rechazan.
+    match /reservas/{id} {
+      function ruta(rid) { return get(/databases/$(database)/documents/rutas/$(rid)).data; }
+      function rutaDespues(rid) { return getAfter(/databases/$(database)/documents/rutas/$(rid)).data; }
+      function soloCambia(campos) { return cambios().hasOnly(campos); }
+      function esParticipante() {
+        return resource.data.pasajeroId == request.auth.uid
+            || resource.data.conductorId == request.auth.uid;
+      }
+      // La ruta cambia su ocupación de esa fecha en `delta`, en esta misma escritura y ligada a esta reserva.
+      function ocupacionLigada(delta) {
+        return rutaDespues(resource.data.rutaId).get('ultimaReserva', '') == id
+            && ocupados(rutaDespues(resource.data.rutaId), resource.data.fecha)
+               == ocupados(ruta(resource.data.rutaId), resource.data.fecha) + delta;
+      }
+      // El viaje de esa ruta y fecha ya terminó: la reserva aceptada queda como registro.
+      function viajeFinalizado(r) {
+        let v = /databases/$(database)/documents/viajes/$(r.rutaId + '_' + r.fecha);
+        return exists(v) && get(v).data.estado == 'finalizado';
+      }
+      // Misma fórmula que la app: km × tarifa, redondeo a 50 céntimos, mínimo S/ 2.
+      function pasajeValido(d, r) {
+        let base = math.floor((math.round(d.kmCompartidos * r.get('tarifaKmCentimos', 25)) + 25) / 50) * 50;
+        return d.pasajeCentimos is int
+            && ((base < 200 && d.pasajeCentimos == 200) || (base >= 200 && d.pasajeCentimos == base));
+      }
+      function nuevaValida(rid, d, r) {
+        return d.keys().hasOnly(['rutaId', 'conductorId', 'pasajeroId', 'nombrePasajero', 'nombreConductor',
+                                 'fecha', 'horaSalida', 'subida', 'bajada', 'kmCompartidos',
+                                 'pasajeCentimos', 'mensaje', 'estado', 'creadaEn'])
+            && d.keys().hasAll(['rutaId', 'conductorId', 'pasajeroId', 'fecha', 'horaSalida', 'subida',
+                                'bajada', 'kmCompartidos', 'pasajeCentimos', 'mensaje', 'estado', 'creadaEn'])
+            && d.pasajeroId == request.auth.uid
+            && d.estado == 'pendiente'
+            && d.fecha is string && d.fecha.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+            && d.fecha >= hoy()
+            && rid == d.rutaId + '_' + request.auth.uid + '_' + d.fecha
+            && r.conductorId == d.conductorId
+            && r.conductorId != request.auth.uid
+            && r.estado == 'activa'
+            && comunidadVisible(r.get('comunidad', ''))
+            && d.horaSalida == r.horaSalida
+            && d.creadaEn == request.time
+            && d.mensaje is string && d.mensaje.size() <= 500
+            && d.subida is map && d.bajada is map
+            && d.kmCompartidos is number && d.kmCompartidos > 0
+            && pasajeValido(d, r);
+      }
+
+      // get con resource == null: el pasajero comprueba en la transacción si ya pidió ese día.
+      // Las consultas (list) solo devuelven reservas propias.
+      allow get: if autenticado() && (resource == null || esParticipante());
+      allow list: if autenticado() && esParticipante();
+
+      allow create: if autenticado()
+                    && nuevaValida(id, request.resource.data, ruta(request.resource.data.rutaId));
+
+      allow update: if autenticado() && (
+          // Pasajero: cancela una pendiente; cancela una aceptada vigente liberando su asiento;
+          // o vuelve a pedir tras rechazo/cancelación (no para días pasados).
+          (resource.data.pasajeroId == request.auth.uid
+            && soloCambia(['estado', 'mensaje', 'actualizadaEn'])
+            && request.resource.data.actualizadaEn == request.time
+            && request.resource.data.mensaje is string && request.resource.data.mensaje.size() <= 500
+            && ((resource.data.estado == 'pendiente' && request.resource.data.estado == 'cancelada')
+                || (resource.data.estado == 'aceptada' && request.resource.data.estado == 'cancelada'
+                    && resource.data.fecha >= hoy() && !viajeFinalizado(resource.data) && ocupacionLigada(-1))
+                || (resource.data.estado in ['rechazada', 'cancelada'] && request.resource.data.estado == 'pendiente'
+                    && resource.data.fecha >= hoy())
+                // Invitación del conductor: el pasajero la acepta (vuelve a pendiente) o la declina.
+                || (resource.data.estado == 'invitada' && request.resource.data.estado in ['pendiente', 'cancelada']
+                    && resource.data.fecha >= hoy())))
+          ||
+          // Pasajero: reenvía su solicitud (pendiente, rechazada o cancelada → pendiente) con nuevos
+          // puntos de subida/bajada; el pasaje se vuelve a validar con la tarifa de la ruta.
+          (resource.data.pasajeroId == request.auth.uid
+            && soloCambia(['estado', 'mensaje', 'actualizadaEn', 'subida', 'bajada', 'kmCompartidos', 'pasajeCentimos'])
+            && resource.data.estado in ['pendiente', 'rechazada', 'cancelada']
+            && request.resource.data.estado == 'pendiente'
+            && resource.data.fecha >= hoy()
+            && request.resource.data.actualizadaEn == request.time
+            && request.resource.data.mensaje is string && request.resource.data.mensaje.size() <= 500
+            && request.resource.data.subida is map && request.resource.data.bajada is map
+            && request.resource.data.kmCompartidos is number && request.resource.data.kmCompartidos > 0
+            && pasajeValido(request.resource.data, ruta(resource.data.rutaId)))
+          ||
+          // Conductor: rechaza, reconsidera un rechazo (no una cancelación del pasajero) o acepta
+          // sumando 1 en la ruta para ese día en la misma escritura, sin pasar la capacidad.
+          (resource.data.conductorId == request.auth.uid
+            && soloCambia(['estado', 'respondidaEn', 'actualizadaEn'])
+            && ((resource.data.estado == 'pendiente' && request.resource.data.estado == 'rechazada')
+                || (resource.data.estado == 'rechazada' && request.resource.data.estado == 'pendiente'
+                    && resource.data.fecha >= hoy())
+                // Tras una cancelación del pasajero, el conductor solo puede invitarlo de nuevo
+                // (no lo reserva: el pasajero decide si acepta).
+                || (resource.data.estado == 'cancelada' && request.resource.data.estado == 'invitada'
+                    && resource.data.fecha >= hoy())
+                || (resource.data.estado == 'pendiente' && request.resource.data.estado == 'aceptada'
+                    && resource.data.fecha >= hoy()
+                    && ruta(resource.data.rutaId).conductorId == request.auth.uid
+                    && ruta(resource.data.rutaId).estado == 'activa'
+                    && ocupacionLigada(1)
+                    && ocupados(rutaDespues(resource.data.rutaId), resource.data.fecha)
+                       <= ruta(resource.data.rutaId).asientos)))
+        );
+
+      // Nunca se borran: son el registro compartido entre pasajero y conductor
+      // (también al eliminar la cuenta; ver borrarTodoDelUsuario).
+      allow delete: if false;
+    }
+
+    // Viaje en curso: una salida por ruta y fecha (id "<rutaId>_<fecha>"). Solo el conductor dueño
+    // la crea y la cambia. Sus estados (y los de recogida) son propios: no tocan reservas ni asientos.
+    // El pasajero accede solo mientras su reserva de esa ruta y fecha esté aceptada (id de reserva
+    // calculado con su propio uid, nunca aportado por el cliente).
+    match /viajes/{vid} {
+      function rutaDe(rid) { return get(/databases/$(database)/documents/rutas/$(rid)).data; }
+      function reservaDe(v, uid) {
+        return get(/databases/$(database)/documents/reservas/$(v.rutaId + '_' + uid + '_' + v.fecha)).data;
+      }
+      function esConductorDe(v) { return v.conductorId == request.auth.uid; }
+      // Día de hoy en Lima, 1 = lunes … 7 = domingo (igual que `dias` de la ruta, DayOfWeek.value).
+      function diaHoy() { return (request.time - duration.value(5, 'h')).dayOfWeek(); }
+      // Rutas sin días (antiguas) se aceptan como en la app.
+      function saleHoy(r) { return !('dias' in r) || r.dias.size() == 0 || diaHoy() in r.dias; }
+      function pasajeroVigente(v) { return reservaDe(v, request.auth.uid).estado == 'aceptada'; }
+      function transicion(a, b) {
+        return (a == 'preparando' && b in ['saliendo', 'en_curso', 'finalizado'])
+            || (a == 'saliendo' && b in ['en_curso', 'finalizado'])
+            || (a == 'en_curso' && b == 'finalizado');
+      }
+      // Cada marca de tiempo cambia solo con su estado y con la hora del servidor.
+      function marca(campo, estado) {
+        return cambios().hasAny([campo]) == (request.resource.data.estado == estado)
+            && (!cambios().hasAny([campo]) || request.resource.data.get(campo, null) == request.time);
+      }
+
+      // resource == null: el conductor comprueba en la transacción si ya existe; el pasajero ve
+      // «aún no inicia». Las consultas solo devuelven viajes propios del conductor.
+      allow get: if autenticado()
+                  && (resource == null || esConductorDe(resource.data) || pasajeroVigente(resource.data));
+      allow list: if autenticado() && resource.data.conductorId == request.auth.uid;
+      allow create: if autenticado()
+                    && request.resource.data.keys().hasOnly(['conductorId', 'rutaId', 'fecha', 'estado', 'creadoEn', 'actualizadoEn'])
+                    && request.resource.data.conductorId == request.auth.uid
+                    && request.resource.data.estado == 'preparando'
+                    && request.resource.data.fecha == hoy()
+                    && vid == request.resource.data.rutaId + '_' + request.resource.data.fecha
+                    && rutaDe(request.resource.data.rutaId).conductorId == request.auth.uid
+                    && rutaDe(request.resource.data.rutaId).estado == 'activa'
+                    && saleHoy(rutaDe(request.resource.data.rutaId))
+                    && request.resource.data.creadoEn == request.time
+                    && request.resource.data.actualizadoEn == request.time;
+      allow update: if autenticado() && esConductorDe(resource.data)
+                    && cambios().hasOnly(['estado', 'salidaEn', 'iniciadoEn', 'finalizadoEn', 'actualizadoEn'])
+                    && transicion(resource.data.estado, request.resource.data.estado)
+                    && request.resource.data.actualizadoEn == request.time
+                    && marca('salidaEn', 'saliendo') && marca('iniciadoEn', 'en_curso') && marca('finalizadoEn', 'finalizado');
+      allow delete: if false;
+
+      // Ubicación del conductor: la escribe solo él mientras el viaje no termine; la leen él y los
+      // pasajeros con reserva aceptada vigente. Al finalizar se borra y deja de poder leerse.
+      match /ubicacion/{doc} {
+        function viaje() { return get(/databases/$(database)/documents/viajes/$(vid)).data; }
+        allow read: if autenticado() && doc == 'actual'
+                    && viaje().estado != 'finalizado'
+                    && (esConductorDe(viaje()) || pasajeroVigente(viaje()));
+        function escrituraBase() {
+          return autenticado() && doc == 'actual'
+              && esConductorDe(viaje())
+              && viaje().estado in ['preparando', 'saliendo', 'en_curso']
+              && request.resource.data.keys().hasOnly(['latitud', 'longitud', 'tomadaEn', 'en', 'activa'])
+              && request.resource.data.latitud is number && request.resource.data.longitud is number
+              && math.abs(request.resource.data.latitud) <= 90 && math.abs(request.resource.data.longitud) <= 180
+              && request.resource.data.activa is bool
+              && request.resource.data.en == request.time;
+        }
+        // tomadaEn = hora de la muestra GPS (aparte de `en`, la recepción): reciente y no del futuro.
+        function muestraReciente() {
+          return request.resource.data.tomadaEn is timestamp
+              && request.resource.data.tomadaEn <= request.time + duration.value(1, 'm')
+              && request.resource.data.tomadaEn >= request.time - duration.value(10, 'm');
+        }
+        allow create: if escrituraBase() && muestraReciente();
+        // Pausa: no cambia posición ni muestra. Nueva posición: siempre con una muestra más nueva
+        // (no se reenvía una posición vieja con hora nueva).
+        allow update: if escrituraBase()
+                    && (!cambios().hasAny(['latitud', 'longitud', 'tomadaEn'])
+                        || (muestraReciente()
+                            && request.resource.data.tomadaEn > resource.data.get('tomadaEn', timestamp.date(1970, 1, 1))));
+        allow delete: if autenticado() && esConductorDe(viaje());
+      }
+
+      // Ubicación en vivo de cada pasajero (id = su uid): la escribe él mientras el viaje no termine;
+      // la leen él y el conductor del viaje (este, solo hasta que el viaje termina).
+      match /pasajerosUbicacion/{pid} {
+        function viaje() { return get(/databases/$(database)/documents/viajes/$(vid)).data; }
+        allow read: if autenticado() && (pid == request.auth.uid
+                    || (esConductorDe(viaje()) && viaje().estado != 'finalizado'));
+        allow create, update: if autenticado() && pid == request.auth.uid
+                    && viaje().estado in ['preparando', 'saliendo', 'en_curso']
+                    && pasajeroVigente(viaje())
+                    && request.resource.data.keys().hasOnly(['latitud', 'longitud', 'en'])
+                    && request.resource.data.latitud is number && request.resource.data.longitud is number
+                    && math.abs(request.resource.data.latitud) <= 90 && math.abs(request.resource.data.longitud) <= 180
+                    && request.resource.data.en == request.time;
+        allow delete: if autenticado() && pid == request.auth.uid;
+      }
+
+      // Recogida de cada pasajero (id = id de su reserva). El pasajero solo ve la suya.
+      match /paradas/{rid} {
+        function viaje() { return get(/databases/$(database)/documents/viajes/$(vid)).data; }
+        function idPropio(uid) { return rid == viaje().rutaId + '_' + uid + '_' + viaje().fecha; }
+        allow get: if autenticado()
+                    && ((resource == null && (esConductorDe(viaje()) || idPropio(request.auth.uid)))
+                        || (resource != null && (resource.data.conductorId == request.auth.uid
+                                                 || resource.data.pasajeroId == request.auth.uid)));
+        allow list: if autenticado() && resource.data.conductorId == request.auth.uid;
+        allow create: if autenticado()
+                    && esConductorDe(viaje()) && viaje().estado == 'en_curso'
+                    && request.resource.data.keys().hasOnly(['pasajeroId', 'conductorId', 'estado', 'actualizadoEn'])
+                    && request.resource.data.conductorId == request.auth.uid
+                    && request.resource.data.estado in ['llegue', 'a_bordo']
+                    && request.resource.data.actualizadoEn == request.time
+                    && idPropio(request.resource.data.pasajeroId)
+                    && get(/databases/$(database)/documents/reservas/$(rid)).data.estado == 'aceptada';
+        allow update: if autenticado()
+                    && resource.data.conductorId == request.auth.uid
+                    && esConductorDe(viaje()) && viaje().estado == 'en_curso'
+                    && cambios().hasOnly(['estado', 'actualizadoEn'])
+                    && resource.data.estado == 'llegue' && request.resource.data.estado == 'a_bordo'
+                    && request.resource.data.actualizadoEn == request.time;
+        allow delete: if false;
+      }
+    }
+
+    // Chat de una reserva: solo pasajero y conductor. Se escribe hasta el día del viaje; no se edita ni borra.
+    match /reservas/{rid}/mensajes/{mid} {
+      function reservaChat() { return get(/databases/$(database)/documents/reservas/$(rid)).data; }
+      function participante(r) { return r.pasajeroId == request.auth.uid || r.conductorId == request.auth.uid; }
+      allow read: if autenticado() && participante(reservaChat());
+      allow create: if autenticado()
+                    && participante(reservaChat())
+                    && reservaChat().estado in ['pendiente', 'aceptada']
+                    && reservaChat().fecha >= hoy()
+                    && request.resource.data.keys().hasOnly(['autorId', 'texto', 'creadoEn'])
+                    && request.resource.data.autorId == request.auth.uid
+                    && request.resource.data.texto is string
+                    && request.resource.data.texto.size() > 0 && request.resource.data.texto.size() <= 500
+                    && request.resource.data.creadoEn == request.time;
+      allow update, delete: if false;
+    }
+
+    // Perfil visible para otros: nombre, vehículo y promedio de calificaciones.
+    // El dueño edita nombre/vehículo; los demás solo suman una calificación ligada (sin servidor).
+    match /perfilesPublicos/{uid} {
+      function texto(v, max) { return v is string && v.size() <= max; }
+      function vehiculoValido(v) {
+        return v is map && v.keys().hasOnly(['marca', 'modelo', 'color', 'placa', 'anio', 'capacidad', 'foto'])
+            && texto(v.get('marca', ''), 30) && texto(v.get('modelo', ''), 30)
+            && texto(v.get('color', ''), 20) && texto(v.get('placa', ''), 10)
+            && texto(v.get('anio', ''), 4) && v.get('capacidad', 0) is int && v.get('capacidad', 0) >= 0
+            && v.get('capacidad', 0) <= 8 && texto(v.get('foto', ''), 120000);
+      }
+      // foto: JPEG pequeño en base64 (la app lo reduce a 256 px); acercaDe: texto corto.
+      // Empresa verificada: solo el dominio del correo con que se entró, verificado y no público.
+      function dominioValido(dom) {
+        return dom == '' || (request.auth.token.email_verified == true
+            && request.auth.token.email.lower().split('@')[1] == dom
+            && !(dom in ['gmail.com', 'googlemail.com', 'hotmail.com', 'outlook.com', 'live.com',
+                         'yahoo.com', 'yahoo.es', 'icloud.com', 'proton.me', 'protonmail.com']));
+      }
+      function propiosValidos(d) {
+        return texto(d.get('nombre', ''), 60) && vehiculoValido(d.get('vehiculo', {}))
+            && texto(d.get('acercaDe', ''), 200) && texto(d.get('foto', ''), 120000)
+            && d.get('preferencias', []) is list && d.get('preferencias', []).size() <= 8
+            && texto(d.get('empresa', ''), 60) && texto(d.get('empresaClave', ''), 60)
+            && dominioValido(d.get('empresaDominio', ''))
+            && d.actualizadoEn == request.time;
+      }
+      // La suma/cantidad cambian exactamente por una calificación nueva creada en esta misma escritura.
+      function calificacionLigada(d, suma, cantidad) {
+        let cid = d.ultimaCalificacion;
+        let c = getAfter(/databases/$(database)/documents/calificaciones/$(cid)).data;
+        return cid is string
+            && !exists(/databases/$(database)/documents/calificaciones/$(cid))
+            && c.destinatarioId == uid && c.autorId == request.auth.uid
+            && d.calificacionSuma == suma + c.estrellas
+            && d.calificacionCantidad == cantidad + 1;
+      }
+      allow read: if autenticado();
+      allow create: if autenticado() && (
+          (request.auth.uid == uid
+            && request.resource.data.keys().hasOnly(['nombre', 'vehiculo', 'acercaDe', 'foto', 'preferencias', 'empresa', 'empresaClave', 'empresaDominio', 'actualizadoEn', 'calificacionSuma', 'calificacionCantidad'])
+            && propiosValidos(request.resource.data)
+            && request.resource.data.get('calificacionSuma', 0) == 0
+            && request.resource.data.get('calificacionCantidad', 0) == 0)
+          || (request.auth.uid != uid
+            && request.resource.data.keys().hasOnly(['calificacionSuma', 'calificacionCantidad', 'ultimaCalificacion'])
+            && calificacionLigada(request.resource.data, 0, 0)));
+      allow update: if autenticado() && (
+          (request.auth.uid == uid
+            && cambios().hasOnly(['nombre', 'vehiculo', 'acercaDe', 'foto', 'preferencias', 'empresa', 'empresaClave', 'empresaDominio', 'actualizadoEn'])
+            && propiosValidos(request.resource.data))
+          || (request.auth.uid != uid
+            && cambios().hasOnly(['calificacionSuma', 'calificacionCantidad', 'ultimaCalificacion'])
+            && calificacionLigada(request.resource.data,
+                 resource.data.get('calificacionSuma', 0), resource.data.get('calificacionCantidad', 0))));
+      // Al eliminar la cuenta, la persona borra su perfil público.
+      allow delete: if autenticado() && request.auth.uid == uid;
+    }
+
+    // Datos privados de la cuenta (por ahora, el celular): solo su dueño los lee y escribe.
+    match /usuarios/{uid} {
+      // Comunidad Tecsup: solo con correo @tecsup.edu.pe verificado (se comprueba en el servidor).
+      function esTecsup() {
+        return request.auth.token.get('email', '').lower().matches('.*@tecsup[.]edu[.]pe$')
+            && request.auth.token.get('email_verified', false) == true;
+      }
+      function nombreValido(v) { return v is string && v.size() >= 2 && v.size() <= 60; }
+      function registroValido(d) {
+        return (!('nombres' in d) || nombreValido(d.nombres))
+            && (!('apellidos' in d) || nombreValido(d.apellidos))
+            && (!('rol' in d) || d.rol in ['pasajero', 'conductor', 'ambos'])
+            && (!('comunidad' in d) || (d.comunidad in ['tecsup', 'externa'] && (d.comunidad == 'tecsup') == esTecsup()))
+            && (!('motivos' in d) || (d.motivos is list && d.motivos.size() <= 8 && d.get('comunidad', '') == 'externa'))
+            && (!('motivoOtro' in d) || (d.motivoOtro is string && d.motivoOtro.size() <= 120 && d.get('comunidad', '') == 'externa'));
+      }
+      allow read, delete: if autenticado() && request.auth.uid == uid;
+      allow create, update: if autenticado() && request.auth.uid == uid
+                    && request.resource.data.keys().hasOnly(['telefono', 'actualizadoEn',
+                         'nombres', 'apellidos', 'rol', 'comunidad', 'motivos', 'motivoOtro'])
+                    && registroValido(request.resource.data)
+                    && request.resource.data.telefono is string
+                    && request.resource.data.telefono.matches('^[+]?[0-9 ]{6,16}$|^$')
+                    && request.resource.data.actualizadoEn == request.time;
+    }
+
+    // Acuerdo habitual (id "<rutaId>_<pasajeroId>"): lo leen sus dos participantes. Solo lo escriben las
+    // Cloud Functions (solicitarHabitual, responderHabitual…), que validan cupos y crean las reservas.
+    match /habituales/{hid} {
+      allow get: if autenticado() && (resource == null
+                  || resource.data.pasajeroId == request.auth.uid || resource.data.conductorId == request.auth.uid);
+      allow list: if autenticado()
+                  && (resource.data.pasajeroId == request.auth.uid || resource.data.conductorId == request.auth.uid);
+      allow write: if false;
+    }
+
+    // Tokens push de los teléfonos del usuario (id = token). Solo su dueño; Cloud Functions los lee.
+    match /usuarios/{uid}/tokens/{token} {
+      allow read, delete: if autenticado() && request.auth.uid == uid;
+      allow create, update: if autenticado() && request.auth.uid == uid
+                    && token.size() <= 512
+                    && request.resource.data.keys().hasOnly(['actualizadoEn'])
+                    && request.resource.data.actualizadoEn == request.time;
+    }
+
+    // «Mis conductores» del pasajero: privada (solo su dueño la lee y la cambia).
+    match /usuarios/{uid}/conductores/{conductorId} {
+      allow read, delete: if autenticado() && request.auth.uid == uid;
+      allow create, update: if autenticado() && request.auth.uid == uid
+                    && conductorId != uid
+                    && request.resource.data.keys().hasOnly(['agregadoEn'])
+                    && request.resource.data.agregadoEn == request.time;
+    }
+
+    // Una calificación por persona y reserva aceptada, solo después del viaje. Inmutable.
+    match /calificaciones/{cid} {
+      function reservaDe(rid) { return get(/databases/$(database)/documents/reservas/$(rid)).data; }
+      function viajeTerminado(r) {
+        return r.fecha < hoy()
+            || get(/databases/$(database)/documents/viajes/$(r.rutaId + '_' + r.fecha)).data.estado == 'finalizado';
+      }
+      function valida(d) {
+        let r = reservaDe(d.reservaId);
+        return d.keys().hasOnly(['reservaId', 'autorId', 'destinatarioId', 'estrellas', 'comentario', 'creadaEn'])
+            && d.autorId == request.auth.uid
+            && cid == d.reservaId + '_' + d.autorId
+            && r.estado == 'aceptada'
+            && ((r.pasajeroId == request.auth.uid && d.destinatarioId == r.conductorId)
+                || (r.conductorId == request.auth.uid && d.destinatarioId == r.pasajeroId))
+            && viajeTerminado(r)
+            && d.estrellas is int && d.estrellas >= 1 && d.estrellas <= 5
+            && d.comentario is string && d.comentario.size() <= 280
+            && d.creadaEn == request.time
+            && getAfter(/databases/$(database)/documents/perfilesPublicos/$(d.destinatarioId)).data.ultimaCalificacion == cid;
+      }
+      allow read: if autenticado()
+                  && (resource.data.autorId == request.auth.uid || resource.data.destinatarioId == request.auth.uid);
+      allow create: if autenticado() && valida(request.resource.data);
+      allow update, delete: if false;
+    }
+
+    match /busquedas/{id} {
+      allow create: if request.auth != null
+                    && request.resource.data.pasajeroId == request.auth.uid;
+      allow read, update, delete: if request.auth != null
+                    && resource.data.pasajeroId == request.auth.uid;
+    }
+  }
+}
