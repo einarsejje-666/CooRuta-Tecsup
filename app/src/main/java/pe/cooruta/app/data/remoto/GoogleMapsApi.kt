@@ -124,7 +124,9 @@ data class RutaGoogleJson(
     val staticDuration: String? = null,
     val distanceMeters: Double?,
     val polyline: PolylineJson?,
-    val legs: List<TramoGoogleJson>?
+    val legs: List<TramoGoogleJson>?,
+    /** Token para que el Navigation SDK siga exactamente esta ruta (solo si se pide en el FieldMask). */
+    val routeToken: String? = null
 )
 data class PolylineJson(val encodedPolyline: String?)
 data class TramoGoogleJson(val duration: String?, val distanceMeters: Double?)

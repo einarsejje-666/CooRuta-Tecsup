@@ -136,6 +136,38 @@ class RutasRepositorio(
     /** Comunidad de la cuenta ("tecsup" o "externa"); las reglas la vuelven a comprobar. */
     private fun miComunidad(): String = comunidadDe(auth.currentUser?.email).clave
 
+    /** Grupos con los que se comparte una ruta mía (vacío = toda la comunidad). */
+    suspend fun gruposDeRuta(id: String): List<String> = runCatching {
+        val d = suspendCancellableCoroutine { c ->
+            db.collection("rutas").document(id).get()
+                .addOnSuccessListener { if (c.isActive) c.resume(it) }
+                .addOnFailureListener { if (c.isActive) c.resumeWithException(it) }
+        }
+        (d.get("grupos") as? List<*>).orEmpty().filterIsInstance<String>()
+    }.getOrDefault(emptyList())
+
+    /** Rutas activas compartidas solo con mis grupos (para Buscar). */
+    suspend fun rutasDeMisGrupos(): List<MiRuta> = runCatching {
+        val r = kotlinx.coroutines.withTimeout(20_000) {
+            suspendCancellableCoroutine<Any?> { k ->
+                com.google.firebase.functions.FirebaseFunctions.getInstance(HabitualesRepositorio.REGION)
+                    .getHttpsCallable("rutasDeMisGrupos").call()
+                    .addOnSuccessListener { if (k.isActive) k.resume(it.data) }
+                    .addOnFailureListener { if (k.isActive) k.resumeWithException(it) }
+            }
+        }
+        val ids = ((r as? Map<*, *>)?.get("ids") as? List<*>).orEmpty().filterIsInstance<String>()
+        ids.mapNotNull { id ->
+            runCatching {
+                suspendCancellableCoroutine { c ->
+                    db.collection("rutas").document(id).get()
+                        .addOnSuccessListener { if (c.isActive) c.resume(it) }
+                        .addOnFailureListener { if (c.isActive) c.resumeWithException(it) }
+                }
+            }.getOrNull()?.let(::comoRuta)
+        }.filter { it.activa && !it.prueba }
+    }.getOrDefault(emptyList())
+
     /** Rutas propias publicadas antes de las comunidades: se les asigna la comunidad del conductor. */
     suspend fun asignarComunidadPendiente() {
         val uid = auth.currentUser?.uid ?: return
@@ -168,7 +200,9 @@ class RutasRepositorio(
         /** Tramo visible en Buscar ya confirmado por el conductor; null = automático o ninguno. */
         tramo: pe.cooruta.app.data.TramoPublicado? = null,
         /** Editar una ruta existente: se conserva su ocupación y no se bajan asientos. */
-        edicion: Boolean = false
+        edicion: Boolean = false,
+        /** Grupos con los que se comparte; vacío = toda la comunidad. */
+        grupos: List<String> = emptyList()
     ): Resultado<String> {
         val uid = auth.currentUser?.uid
             ?: return Resultado.Error("Inicia sesión con Google para publicar.")
@@ -202,7 +236,8 @@ class RutasRepositorio(
                 put("asientos", horario.asientos)
                 put("pasajeCentimos", horario.pasajeCentimos)
                 put("tarifaKmCentimos", pe.cooruta.app.ui.horario.TARIFA_KM_CENTIMOS)
-                put("comunidad", miComunidad())
+                put("comunidad", if (grupos.isEmpty()) miComunidad() else miComunidad() + "-grupos")
+                put("grupos", grupos.distinct().take(10))
             }
             put("estado", "activa")
             if (alias.isNotBlank()) put("alias", alias.trim())

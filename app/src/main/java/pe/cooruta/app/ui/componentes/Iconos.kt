@@ -1,7 +1,6 @@
 package pe.cooruta.app.ui.componentes
 
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.outlined.EventSeat
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
@@ -20,6 +19,11 @@ import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
@@ -31,7 +35,40 @@ import androidx.compose.ui.unit.dp
 /** Volver. */
 @Composable
 fun IconoAtras(modifier: Modifier = Modifier, color: Color = Color.White, tamano: Dp = 24.dp) =
-    IconoM(Icons.AutoMirrored.Rounded.ArrowBack, color, tamano, modifier)
+    IconoM(FlechaAtras, color, tamano, modifier)
+
+/** Adelante / abrir: flecha «>». */
+@Composable
+fun IconoAdelante(modifier: Modifier = Modifier, color: Color = Color.White, tamano: Dp = 24.dp) =
+    IconoM(FlechaAdelante, color, tamano, modifier)
+
+/** Desplegar: flecha hacia abajo. */
+@Composable
+fun IconoAbajo(modifier: Modifier = Modifier, color: Color = Color.White, tamano: Dp = 24.dp) =
+    IconoM(FlechaAbajo, color, tamano, modifier)
+
+/** Plegar: flecha hacia arriba. */
+@Composable
+fun IconoArriba(modifier: Modifier = Modifier, color: Color = Color.White, tamano: Dp = 24.dp) =
+    IconoM(FlechaArriba, color, tamano, modifier)
+
+/** Flechas de línea fina, el mismo estilo en toda la app. */
+private fun flecha(nombre: String, trazo: String, espejo: Boolean) =
+    ImageVector.Builder(nombre, 24.dp, 24.dp, 24f, 24f, autoMirror = espejo).apply {
+        addPath(
+            pathData = addPathNodes(trazo),
+            fill = null,
+            stroke = SolidColor(Color.White),
+            strokeLineWidth = 2.4f,
+            strokeLineCap = StrokeCap.Round,
+            strokeLineJoin = StrokeJoin.Round
+        )
+    }.build()
+
+private val FlechaAtras: ImageVector by lazy { flecha("flechaAtras", "M15 4.5 L7.5 12 L15 19.5", true) }
+private val FlechaAdelante: ImageVector by lazy { flecha("flechaAdelante", "M9 4.5 L16.5 12 L9 19.5", true) }
+private val FlechaAbajo: ImageVector by lazy { flecha("flechaAbajo", "M4.5 9 L12 16.5 L19.5 9", false) }
+private val FlechaArriba: ImageVector by lazy { flecha("flechaArriba", "M4.5 15 L12 7.5 L19.5 15", false) }
 
 /** Intercambiar origen y destino. */
 @Composable
