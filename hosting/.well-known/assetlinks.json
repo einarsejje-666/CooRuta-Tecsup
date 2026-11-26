@@ -5,8 +5,11 @@
       "namespace": "android_app",
       "package_name": "pe.cooruta.app",
       "sha256_cert_fingerprints": [
-        "PEGA_AQUI_SHA256_DEBUG",
-        "PEGA_AQUI_SHA256_RELEASE"
+        "2C:53:AE:46:E0:99:8B:42:00:66:5E:F7:7F:B5:59:53:EA:C7:77:01:66:24:AF:D8:83:55:80:84:03:F2:C7:EC",
+        "C1:3F:3F:3D:7E:B4:D7:54:94:FF:61:C5:EC:58:08:3F:79:7B:1A:B1:F0:5F:85:81:6C:A8:80:C4:5B:93:15:C1",
+        "BF:96:63:51:37:33:07:E8:A9:4C:51:22:DE:62:D2:C2:57:41:0B:B9:51:C6:0B:26:7F:F8:92:FC:F7:2D:35:54",
+        "68:EC:07:C2:E5:34:3F:78:45:0C:DB:9D:08:84:FD:2A:4D:28:66:CE:4F:6A:AD:4C:C5:66:B0:3C:A4:46:70:5E",
+        "C9:AE:0F:A1:07:3D:C6:EB:0C:12:8D:1A:1C:F6:A9:CF:4D:BA:F5:81:83:F3:E6:56:30:4B:92:1C:F0:9C:0F:E7"
       ]
     }
   }

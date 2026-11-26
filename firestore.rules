@@ -55,6 +55,16 @@ service cloud.firestore {
     }
     // c es la comunidad de un documento: solo la ve (o la escribe) quien pertenece a ella.
     function comunidadVisible(c) { return (esDeTecsup() && c == 'tecsup') || (!esDeTecsup() && c == 'externa'); }
+    // Rutas solo para grupos: comunidad "<comunidad>-grupos" y `grupos` con los ids elegidos (máx. 10).
+    function grupoPropio(c) { return (esDeTecsup() && c == 'tecsup-grupos') || (!esDeTecsup() && c == 'externa-grupos'); }
+    function hayMembresia() { return exists(/databases/$(database)/documents/membresias/$(request.auth.uid)); }
+    function misGruposActivos() { return get(/databases/$(database)/documents/membresias/$(request.auth.uid)).data.get('grupos', []); }
+    function enMisGrupos(lista) { return hayMembresia() && lista.hasAny(misGruposActivos()); }
+    function visibilidadValida(d) {
+      return (comunidadVisible(d.comunidad) && d.get('grupos', []).size() == 0)
+          || (grupoPropio(d.comunidad) && d.get('grupos', []) is list && d.grupos.size() >= 1 && d.grupos.size() <= 10
+              && hayMembresia() && d.grupos.hasOnly(misGruposActivos()));
+    }
     function cambios() { return request.resource.data.diff(resource.data).affectedKeys(); }
     // Hoy en Lima (UTC−5, sin horario de verano) como "yyyy-MM-dd", igual que la app.
     function hoy() {
@@ -75,7 +85,7 @@ service cloud.firestore {
       function publicaValida(d) {
         return d.keys().hasOnly(['conductorId', 'nombre', 'alias', 'origen', 'destino', 'recorrido', 'dias',
                                  'horaSalida', 'minutoSalida', 'asientos', 'tarifaKmCentimos', 'estado',
-                                 'prueba', 'creadaEn', 'tramoPublico', 'comunidad'])
+                                 'prueba', 'creadaEn', 'tramoPublico', 'comunidad', 'grupos'])
             && lugarPublico(d.origen) && lugarPublico(d.destino)
             && (!('recorrido' in d) || (d.recorrido is list && d.recorrido.size() <= 200));
       }
@@ -115,12 +125,16 @@ service cloud.firestore {
       }
 
       // Solo la comunidad de la ruta (el dueño siempre ve las suyas, también las antiguas sin comunidad).
-      allow read: if autenticado()
+      // Las de grupos solo se leen una por una (sus ids los da la función rutasDeMisGrupos).
+      allow get: if autenticado()
+                  && (resource.data.conductorId == request.auth.uid || comunidadVisible(resource.data.comunidad)
+                      || (grupoPropio(resource.data.comunidad) && enMisGrupos(resource.data.get('grupos', []))));
+      allow list: if autenticado()
                   && (resource.data.conductorId == request.auth.uid || comunidadVisible(resource.data.comunidad));
       allow create: if autenticado()
                     && request.resource.data.conductorId == request.auth.uid
                     && publicaValida(request.resource.data)
-                    && comunidadVisible(request.resource.data.comunidad)
+                    && visibilidadValida(request.resource.data)
                     && request.resource.data.asientos is int && request.resource.data.asientos >= 1
                     && request.resource.data.tarifaKmCentimos == 25
                     && request.resource.data.estado == 'activa'
@@ -130,9 +144,11 @@ service cloud.firestore {
           // sin bajar asientos (dejaría sobreocupación) y sin volver a publicar datos exactos.
           (resource.data.conductorId == request.auth.uid
             && !cambios().hasAny(['conductorId', 'ocupadosPorFecha', 'ultimaReserva', 'ultimaFechaAceptada', 'tarifaKmCentimos', 'habitualesPorDia'])
-            // La comunidad no cambia; solo se asigna a rutas antiguas que aún no la tienen.
+            // Comunidad: se asigna a rutas antiguas; después solo alterna entre toda la comunidad y sus grupos.
             && (!cambios().hasAny(['comunidad'])
-                || (!('comunidad' in resource.data) && comunidadVisible(request.resource.data.comunidad)))
+                || (!('comunidad' in resource.data) && comunidadVisible(request.resource.data.comunidad))
+                || visibilidadValida(request.resource.data))
+            && (!cambios().hasAny(['grupos']) || visibilidadValida(request.resource.data))
             && request.resource.data.get('asientos', 0) >= resource.data.get('asientos', 0)
             && (!cambios().hasAny(['origen']) || lugarPublico(request.resource.data.origen))
             && (!cambios().hasAny(['destino']) || lugarPublico(request.resource.data.destino))
@@ -175,6 +191,61 @@ service cloud.firestore {
                   && request.resource.data.rutas is map
                   && request.resource.data.actualizadoEn == request.time;
       allow delete: if autenticado() && request.auth.uid == cid;
+    }
+
+    // Grupos permanentes: solo los escriben las Cloud Functions (crearGrupo, unirseGrupo…); la app lee.
+    match /membresias/{uid} {
+      allow get: if autenticado() && request.auth.uid == uid;
+      allow list, write: if false;
+    }
+    match /grupos/{gid} {
+      allow get: if autenticado() && exists(/databases/$(database)/documents/grupos/$(gid)/miembros/$(request.auth.uid));
+      allow list, write: if false;
+      // Su propio estado (también pendiente); la lista completa solo la ven los integrantes activos.
+      match /miembros/{uid} {
+        allow get: if autenticado() && request.auth.uid == uid;
+        allow list: if autenticado()
+                    && get(/databases/$(database)/documents/grupos/$(gid)/miembros/$(request.auth.uid)).data.estado == 'activo';
+        allow write: if false;
+      }
+    }
+    match /enlacesGrupo/{codigo} {
+      allow read, write: if false;
+    }
+
+    // Contactos: los agrega la función agregarContacto (personas con un grupo o viaje en común).
+    match /usuarios/{uid}/contactos/{otro} {
+      allow read, delete: if autenticado() && request.auth.uid == uid;
+      allow create, update: if false;
+    }
+
+    // Bloqueo "<bloqueador>_<bloqueado>": solo lo ve y lo quita quien bloqueó.
+    match /bloqueos/{id} {
+      allow read, delete: if autenticado() && resource.data.bloqueadorId == request.auth.uid;
+      allow create: if autenticado()
+                    && request.resource.data.keys().hasOnly(['bloqueadorId', 'bloqueadoId', 'nombre', 'creadoEn'])
+                    && request.resource.data.bloqueadorId == request.auth.uid
+                    && request.resource.data.bloqueadoId is string
+                    && request.resource.data.bloqueadoId != request.auth.uid
+                    && id == request.auth.uid + '_' + request.resource.data.bloqueadoId
+                    && request.resource.data.nombre is string && request.resource.data.nombre.size() <= 60
+                    && request.resource.data.creadoEn == request.time;
+      allow update: if false;
+    }
+
+    // Reportes de usuarios o problemas: solo se crean; se revisan desde la consola.
+    match /reportes/{id} {
+      allow create: if autenticado()
+                    && request.resource.data.keys().hasOnly(['autorId', 'reportadoId', 'motivos', 'detalle', 'contexto', 'creadoEn'])
+                    && request.resource.data.autorId == request.auth.uid
+                    && request.resource.data.reportadoId is string && request.resource.data.reportadoId.size() <= 128
+                    && request.resource.data.reportadoId != request.auth.uid
+                    && request.resource.data.motivos is list
+                    && request.resource.data.motivos.size() >= 1 && request.resource.data.motivos.size() <= 6
+                    && request.resource.data.detalle is string && request.resource.data.detalle.size() <= 500
+                    && request.resource.data.contexto is string && request.resource.data.contexto.size() <= 100
+                    && request.resource.data.creadoEn == request.time;
+      allow read, update, delete: if false;
     }
 
     match /rutasPrivadas/{id} {
@@ -251,8 +322,11 @@ service cloud.firestore {
             && rid == d.rutaId + '_' + request.auth.uid + '_' + d.fecha
             && r.conductorId == d.conductorId
             && r.conductorId != request.auth.uid
+            // Nadie pide asiento a quien lo bloqueó, ni a quien bloqueó.
+            && !exists(/databases/$(database)/documents/bloqueos/$(r.conductorId + '_' + request.auth.uid))
+            && !exists(/databases/$(database)/documents/bloqueos/$(request.auth.uid + '_' + r.conductorId))
             && r.estado == 'activa'
-            && comunidadVisible(r.get('comunidad', ''))
+            && (comunidadVisible(r.get('comunidad', '')) || (grupoPropio(r.get('comunidad', '')) && enMisGrupos(r.get('grupos', []))))
             && d.horaSalida == r.horaSalida
             && d.creadaEn == request.time
             && d.mensaje is string && d.mensaje.size() <= 500

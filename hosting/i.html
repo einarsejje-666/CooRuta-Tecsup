@@ -6,7 +6,7 @@
 <title>Invitación a CooRuta</title>
 <meta name="description" content="Te invitaron a un grupo de CooRuta para compartir viajes en Arequipa.">
 <meta property="og:title" content="Te invitaron a CooRuta">
-<meta property="og:description" content="Únete al grupo de un conductor para compartir viajes en Arequipa.">
+<meta property="og:description" content="Únete a un grupo de CooRuta para compartir viajes en Arequipa.">
 <style>
   :root { color-scheme: dark; }
   body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
@@ -25,19 +25,24 @@
 <main>
   <div class="tarjeta">
     <h1>Te invitaron a CooRuta</h1>
-    <p>Un conductor te invita a su grupo para compartir viajes. Abre la invitación en la app para unirte.</p>
+    <p>Te invitaron a un grupo para compartir viajes. Abre la invitación en la app para unirte.</p>
     <a class="boton" id="abrir" href="#">Abrir en CooRuta</a>
     <div class="codigo">Código: <b id="codigo">—</b></div>
-    <p style="margin-top:18px;font-size:13px">¿No tienes la app? Pídele el instalador a quien te invitó y vuelve a abrir este enlace.</p>
+    <p style="margin-top:18px;font-size:13px">¿No tienes la app? <a href="https://play.google.com/store/apps/details?id=pe.cooruta.app" style="color:#7189FF">Descárgala en Google Play</a>, regístrate y vuelve a abrir este enlace.</p>
   </div>
 </main>
 <script>
   // /i/ABCD2345 → ABCD2345. Abre la app con su esquema propio (si está instalada).
   var codigo = (location.pathname.split('/i/')[1] || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 8);
   document.getElementById('codigo').textContent = codigo || '—';
-  var destino = 'intent://i/' + codigo + '#Intent;scheme=cooruta;package=pe.cooruta.app;end';
-  document.getElementById('abrir').href = codigo ? destino : '#';
-  if (codigo && /Android/i.test(navigator.userAgent)) setTimeout(function () { location.href = destino; }, 300);
+  // Si la app no está instalada, Chrome vuelve a esta página (con ?sinapp=1) en vez de abrir Play Store.
+  var sinApp = /(^|[?&])sinapp=1/.test(location.search);
+  var volver = location.origin + '/i/' + codigo + '?sinapp=1';
+  var destino = 'intent://i/' + codigo + '#Intent;scheme=cooruta;package=pe.cooruta.app;S.browser_fallback_url=' + encodeURIComponent(volver) + ';end';
+  var boton = document.getElementById('abrir');
+  boton.href = codigo ? destino : '#';
+  if (sinApp) { boton.textContent = 'Descargar CooRuta'; boton.href = 'https://play.google.com/store/apps/details?id=pe.cooruta.app'; }
+  else if (codigo && /Android/i.test(navigator.userAgent)) setTimeout(function () { location.href = destino; }, 300);
 </script>
 </body>
 </html>

@@ -1,5 +1,198 @@
 <!doctype html>
-<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CooRuta</title>
-<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0A0D14;color:#fff;font-family:Roboto,system-ui,sans-serif;text-align:center}p{color:#9AA4B8}</style>
-</head><body><main><h1>CooRuta</h1><p>Viajes compartidos en Arequipa.</p></main></body></html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CooRuta — Viajes compartidos en Arequipa</title>
+<meta name="description" content="CooRuta conecta a conductores y pasajeros de tu comunidad que hacen el mismo recorrido para compartir los asientos libres y dividir el gasto del viaje.">
+<meta property="og:title" content="CooRuta — Viajes compartidos en Arequipa">
+<meta property="og:description" content="Tu ruta de cada día, compartida con tu comunidad.">
+<link rel="icon" href="/img/logo.png">
+<style>
+  :root { --fondo:#0A0D14; --fondo2:#111827; --panel:#182133; --borde:#28364E; --azul:#556FF7; --azul2:#8FA2FF; --cian:#72CAFF; --texto:#F2F4FA; --suave:#AEB8CF; --radio:16px; --gap:24px; }
+  * { box-sizing:border-box; }
+  html { scroll-behavior:smooth; scroll-padding-top:84px; }
+  body { margin:0; background:var(--fondo); color:var(--texto); font-family:Inter, Roboto, system-ui, -apple-system, "Segoe UI", sans-serif; line-height:1.6; }
+  a { color:var(--azul2); }
+  .contenedor { max-width:1080px; margin:0 auto; padding:0 16px; }
+  header { position:sticky; top:0; z-index:50; padding:14px 0; background:rgba(10,13,20,.72); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px); border-bottom:1px solid transparent; transition:border-color .2s, background .2s; }
+  header.con-borde { border-bottom-color:var(--borde); background:rgba(10,13,20,.92); }
+  .barra { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+  .marca { display:flex; align-items:center; gap:10px; font-weight:700; font-size:20px; color:var(--texto); text-decoration:none; }
+  .marca img { width:36px; height:36px; }
+  nav a { color:var(--suave); text-decoration:none; margin-left:18px; font-size:15px; }
+  .hero { padding:96px 16px 112px; display:grid; grid-template-columns:repeat(12,1fr); gap:var(--gap); align-items:center; }
+  .hero-texto { grid-column:1 / span 7; }
+  .hero .video-tel { grid-column:9 / span 4; justify-self:end; }
+  .hero h1 { font-size:clamp(38px, 5.6vw, 62px); line-height:1.08; margin:0 0 20px; letter-spacing:-1px; }
+  .hero p { color:var(--suave); font-size:19px; margin:0 0 36px; max-width:540px; }
+  .botones { display:flex; flex-wrap:wrap; gap:12px; }
+  .boton { display:inline-block; padding:14px 24px; border-radius:var(--radio); font-weight:700; text-decoration:none; }
+  .primario { background:linear-gradient(90deg,#7189FF,#556FF7,#3F55D9); color:#fff; }
+  .botones { align-items:center; gap:24px; }
+  .enlace { color:var(--azul2); font-weight:600; text-decoration:none; }
+  .enlace:hover { text-decoration:underline; }
+  .hero .nota { color:var(--suave); font-size:14px; margin:20px 0 0; }
+  .telefono { justify-self:center; width:min(300px,80vw); border-radius:28px; border:1px solid var(--borde); box-shadow:0 20px 60px rgba(85,111,247,.25); }
+  .video-tel { position:relative; justify-self:center; width:min(290px,78vw); padding:9px; border-radius:50px; background:#05070c; box-shadow:0 0 0 2px #3b475f, 0 0 0 3px #10151f, 0 30px 80px rgba(85,111,247,.28); }
+  .video-tel::before, .video-tel::after { content:""; position:absolute; right:-5px; width:3px; border-radius:0 2px 2px 0; background:#3b475f; }
+  .video-tel::before { top:20%; height:8%; }
+  .video-tel::after { top:32%; height:14%; }
+  .pantalla { position:relative; aspect-ratio:9/20; border-radius:41px; overflow:hidden; background:var(--fondo); display:flex; align-items:center; }
+  .pantalla video { display:block; width:100%; height:auto; -webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 12%, #000 88%, transparent 100%); mask-image:linear-gradient(to bottom, transparent 0, #000 12%, #000 88%, transparent 100%); }
+  .estado { position:absolute; top:0; left:0; right:0; height:9%; display:flex; align-items:center; justify-content:space-between; padding:0 24px 0 30px; color:#fff; font:600 13px Inter, Roboto, system-ui, sans-serif; z-index:2; }
+  .estado .iconos { display:flex; gap:3px; align-items:center; }
+  .camara { position:absolute; top:3.3%; left:50%; transform:translateX(-50%); width:11px; height:11px; border-radius:50%; background:#000; box-shadow:0 0 0 1.5px #1b2232; z-index:3; }
+  .gestos { position:absolute; bottom:8px; left:50%; transform:translateX(-50%); width:34%; height:4px; border-radius:2px; background:rgba(255,255,255,.55); z-index:2; }
+  .pantalla button { position:absolute; left:50%; bottom:22px; transform:translateX(-50%); display:flex; align-items:center; gap:8px; padding:8px 14px; border-radius:var(--radio); border:1px solid var(--borde); background:rgba(10,13,20,.78); color:var(--texto); font:600 13px Inter, Roboto, system-ui, sans-serif; cursor:pointer; white-space:nowrap; z-index:2; }
+  .pantalla button:hover { border-color:var(--azul); }
+  section { padding:96px 0; }
+  section.alt { background:var(--fondo2); }
+  h2 { font-size:clamp(26px,3.5vw,36px); margin:0 0 8px; }
+  .sub { color:var(--suave); margin:0 0 48px; font-size:18px; }
+  .pasos { display:grid; grid-template-columns:repeat(3,1fr); gap:var(--gap); }
+  .paso img { width:100%; border-radius:var(--radio); border:1px solid var(--borde); background:var(--panel); }
+  .paso b { display:block; color:var(--azul2); margin-top:14px; font-size:14px; letter-spacing:1px; }
+  .paso h3 { margin:2px 0 6px; font-size:20px; }
+  .paso p { margin:0; color:var(--suave); }
+  .tarjetas { display:grid; grid-template-columns:repeat(3,1fr); gap:var(--gap); }
+  .tarjeta { background:var(--panel); border:1px solid var(--borde); border-radius:var(--radio); padding:28px; }
+  .tarjeta h3 { margin:0 0 8px; font-size:19px; }
+  .tarjeta p { margin:0; color:var(--suave); }
+  .doble { display:grid; grid-template-columns:repeat(12,1fr); gap:var(--gap); align-items:center; }
+  .doble img { grid-column:1 / span 4; width:min(300px,80vw); justify-self:start; border-radius:var(--radio); border:1px solid var(--borde); }
+  .doble > div { grid-column:6 / span 7; }
+  ul.lista { padding-left:20px; color:var(--suave); }
+  ul.lista li { margin-bottom:8px; }
+  .revelar { opacity:0; transform:translateY(28px); transition:opacity .6s ease, transform .6s cubic-bezier(.2,.7,.2,1); }
+  .revelar.visible { opacity:1; transform:none; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } .revelar { opacity:1; transform:none; transition:none; } }
+  footer { padding:32px 0 48px; color:var(--suave); font-size:14px; border-top:1px solid var(--borde); }
+  footer .barra { flex-wrap:wrap; }
+  @media (max-width:800px) {
+    .hero, .doble { grid-template-columns:1fr; gap:40px; }
+    .hero > *, .doble > * { grid-column:auto !important; }
+    .hero .video-tel, .doble img { justify-self:center; }
+    .pasos, .tarjetas { grid-template-columns:1fr; }
+    nav { display:none; }
+    .hero { padding:48px 16px 72px; }
+    section { padding:72px 0; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="contenedor barra">
+    <a class="marca" href="/"><img src="/img/logo.png" alt="">CooRuta</a>
+    <nav><a href="#como-funciona">Cómo funciona</a><a href="#por-que">Por qué CooRuta</a><a href="#privacidad">Privacidad</a></nav>
+  </div>
+</header>
+
+<main>
+  <div class="contenedor hero">
+    <div class="hero-texto">
+      <h1>Tu ruta de cada día, compartida con tu comunidad.</h1>
+      <p>CooRuta conecta a conductores y pasajeros que hacen el mismo recorrido en Arequipa para compartir los asientos libres y dividir el gasto del viaje. Sin comisión.</p>
+      <div class="botones">
+        <a class="boton primario" href="https://play.google.com/store/apps/details?id=pe.cooruta.app" target="_blank" rel="noopener">Descargar en Google Play</a>
+        <a class="enlace" href="#como-funciona">Ver cómo funciona →</a>
+      </div>
+      <p class="nota">Disponible en Google Play para Android. Proyecto de estudiantes de Tecsup Arequipa.</p>
+    </div>
+    <div class="video-tel">
+      <div class="pantalla">
+      <div class="estado" aria-hidden="true"><span>9:41</span><span class="iconos"><svg width="15" height="15" viewBox="0 0 24 24"><path fill="currentColor" d="M17 4h3v16h-3V4zM5 14h3v6H5v-6zm6-5h3v11h-3V9z"/></svg><svg width="15" height="15" viewBox="0 0 24 24"><path fill="currentColor" d="M1 9l2 2c4.97-4.97 13.03-4.97 18 0l2-2C16.93 2.93 7.08 2.93 1 9zm8 8l3 3 3-3c-1.65-1.66-4.34-1.66-6 0zm-4-4l2 2c2.76-2.76 7.24-2.76 10 0l2-2C15.14 9.14 8.87 9.14 5 13z"/></svg><svg width="15" height="15" viewBox="0 0 24 24"><path fill="currentColor" d="M15.67 4H14V2h-4v2H8.33C7.6 4 7 4.6 7 5.33v15.33C7 21.4 7.6 22 8.33 22h7.33c.74 0 1.34-.6 1.34-1.33V5.33C17 4.6 16.4 4 15.67 4z"/></svg></span></div>
+      <span class="camara" aria-hidden="true"></span>
+      <video id="promo" src="/video/cooruta-promo-v2.mp4" poster="/video/cooruta-promo-poster.jpg" autoplay muted loop playsinline preload="metadata" aria-label="Video de presentación de CooRuta"></video>
+      <button id="sonido" type="button" aria-pressed="false">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path id="icono-sonido" fill="currentColor" d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>
+        <span>Activar sonido</span>
+      </button>
+      <span class="gestos" aria-hidden="true"></span>
+      </div>
+    </div>
+    <script>
+      (function () {
+        var v = document.getElementById('promo'), b = document.getElementById('sonido');
+        var on = 'M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z';
+        var off = document.getElementById('icono-sonido').getAttribute('d');
+        b.addEventListener('click', function () {
+          v.muted = !v.muted;
+          if (!v.muted) { v.currentTime = 0; v.play(); }
+          b.setAttribute('aria-pressed', String(!v.muted));
+          b.querySelector('span').textContent = v.muted ? 'Activar sonido' : 'Silenciar';
+          document.getElementById('icono-sonido').setAttribute('d', v.muted ? off : on);
+        });
+      })();
+    </script>
+  </div>
+
+  <section class="alt" id="como-funciona">
+    <div class="contenedor">
+      <h2>Así funciona</h2>
+      <p class="sub">El conductor publica su ruta, el pasajero la encuentra y pide su asiento.</p>
+      <div class="pasos">
+        <div class="paso"><img src="/img/horario.jpg" alt="Pantalla de horario con días, hora de salida, asientos y pasaje" loading="lazy"><b>PASO 1</b><h3>Publica tu ruta</h3><p>Indica tu recorrido, los días, la hora de salida y los asientos libres. La app calcula el pasaje por kilómetro.</p></div>
+        <div class="paso"><img src="/img/ruta.jpg" alt="Mapa con la ruta recomendada" loading="lazy"><b>PASO 2</b><h3>Encuentra un viaje</h3><p>Busca una ruta compatible con la tuya, elige dónde subir y bajar, y solicita tu asiento.</p></div>
+        <div class="paso"><img src="/img/quien-ve.jpg" alt="Pantalla para elegir quién puede ver la ruta" loading="lazy"><b>PASO 3</b><h3>Viajen juntos</h3><p>El conductor acepta la solicitud. Durante el viaje ves su avance en vivo y recibes avisos cuando sale y cuando está por llegar.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="por-que">
+    <div class="contenedor">
+      <h2>¿Por qué CooRuta?</h2>
+      <p class="sub">Viajas con personas de confianza, no con desconocidos.</p>
+      <div class="tarjetas">
+        <div class="tarjeta"><h3>Comunidad verificada</h3><p>Los estudiantes de Tecsup entran con su correo institucional. Los usuarios externos tienen su propia comunidad, separada.</p></div>
+        <div class="tarjeta"><h3>Grupos de confianza</h3><p>Crea grupos con quienes hacen tu recorrido e invítalos por WhatsApp. El administrador aprueba a cada persona que entra.</p></div>
+        <div class="tarjeta"><h3>Tú decides quién te ve</h3><p>Publica tu ruta para toda tu comunidad o solo para tus grupos. Puedes bloquear y reportar usuarios.</p></div>
+        <div class="tarjeta"><h3>Sin fines de lucro</h3><p>El pasaje solo cubre el costo del trayecto y se reparte por kilómetro. CooRuta no cobra comisión.</p></div>
+        <div class="tarjeta"><h3>Viajes habituales</h3><p>Si viajan juntos todas las semanas, el asiento aprobado se reserva solo para los días acordados.</p></div>
+        <div class="tarjeta"><h3>Navegación y avisos</h3><p>Navegación con recálculo de ruta, seguimiento del conductor en vivo y chat del viaje.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="alt" id="privacidad">
+    <div class="contenedor doble">
+      <img src="/img/grupo.jpg" alt="Pantalla de un grupo con el botón para invitar por WhatsApp" loading="lazy">
+      <div>
+        <h2>Tu privacidad importa</h2>
+        <ul class="lista">
+          <li>Tu celular y tu correo no se muestran públicamente.</li>
+          <li>La ubicación en vivo solo se comparte con las personas de tu viaje y deja de compartirse al terminarlo.</li>
+          <li>No vendemos datos ni mostramos publicidad.</li>
+          <li>Puedes eliminar tu cuenta cuando quieras desde la app, en Perfil → Eliminar cuenta.</li>
+        </ul>
+        <p><a href="/politica-privacidad">Lee la política de privacidad completa</a></p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="contenedor barra">
+    <span>CooRuta · Arequipa, Perú · Tecsup · Diseño y Desarrollo de Software</span>
+    <span><a href="/politica-privacidad">Política de privacidad</a> · <a href="mailto:eynersejje2002@gmail.com">Contacto</a></span>
+  </div>
+</footer>
+<script>
+  (function () {
+    var h = document.querySelector('header');
+    var borde = function () { h.classList.toggle('con-borde', window.scrollY > 8); };
+    window.addEventListener('scroll', borde, {passive: true}); borde();
+    if (!('IntersectionObserver' in window)) return;
+    var io = new IntersectionObserver(function (es) {
+      es.forEach(function (e) { if (e.isIntersecting) { e.target.classList.add('visible'); io.unobserve(e.target); } });
+    }, {threshold: 0.15, rootMargin: '0px 0px -40px 0px'});
+    document.querySelectorAll('section h2, section .sub, .paso, .tarjeta, .doble > *').forEach(function (el) {
+      var hermanos = Array.prototype.indexOf.call(el.parentNode.children, el);
+      el.classList.add('revelar');
+      if (el.matches('.paso, .tarjeta')) el.style.transitionDelay = (hermanos % 3) * 90 + 'ms';
+      io.observe(el);
+    });
+  })();
+</script>
+</body>
+</html>

@@ -416,7 +416,13 @@ exports.solicitarHabitual = onCall(async (req) => {
   // Comunidades separadas: la del pasajero sale de su correo verificado.
   const correo = String(req.auth.token.email ?? "").toLowerCase();
   const comunidad = correo.endsWith("@tecsup.edu.pe") && req.auth.token.email_verified === true ? "tecsup" : "externa";
-  if (ruta.comunidad !== comunidad) throw new HttpsError("permission-denied", "Esta ruta no está disponible para tu comunidad.");
+  if (ruta.comunidad !== comunidad) {
+    // Ruta solo para grupos: el pasajero debe estar en alguno de ellos.
+    const mios = (await db.collection("membresias").doc(uid).get()).data()?.grupos ?? [];
+    const enGrupo = ruta.comunidad === `${comunidad}-grupos` && (ruta.grupos ?? []).some((g) => mios.includes(g));
+    if (!enGrupo) throw new HttpsError("permission-denied", "Esta ruta no está disponible para ti.");
+  }
+  if (await hayBloqueo(uid, ruta.conductorId)) throw new HttpsError("permission-denied", "No puedes pedir asiento a esta persona.");
   const diasRuta = Array.isArray(ruta.dias) ? ruta.dias : [];
   const fuera = lista.filter((d) => diasRuta.length && !diasRuta.includes(d));
   if (fuera.length) throw new HttpsError("failed-precondition", `El conductor no viaja ${losDias(fuera)}.`);
@@ -907,6 +913,9 @@ exports.eliminarCuentaCompleta = onCall({ timeoutSeconds: 120 }, async (req) => 
     avisar(c, `cuenta_eliminada_${uid}`, "Un pasajero eliminó su cuenta",
       `${quien} eliminó su cuenta de CooRuta. Sus viajes contigo se cancelaron.`)));
 
+  // Sale de sus grupos (el cargo de administrador pasa a otro; grupos vacíos se borran).
+  await salirDeTodosLosGrupos(uid);
+
   // Borrado de todos los registros.
   const docs = [
     ...misHabituales, ...misReservas, ...(privadas?.docs ?? []),
@@ -921,7 +930,362 @@ exports.eliminarCuentaCompleta = onCall({ timeoutSeconds: 120 }, async (req) => 
     refs.slice(i, i + 400).forEach((r) => lote.delete(r));
     await lote.commit();
   }
-  await db.recursiveDelete(db.collection("usuarios").doc(uid)); // perfil privado, conductores, tokens
+  for (const campo of ["bloqueadorId", "bloqueadoId"]) {
+    const b = await db.collection("bloqueos").where(campo, "==", uid).get();
+    for (const d of b.docs) await d.ref.delete();
+  }
+  await db.recursiveDelete(db.collection("usuarios").doc(uid)); // perfil privado, conductores, contactos, tokens
   await getAuth().deleteUser(uid).catch((e) => { if (e.code !== "auth/user-not-found") throw e; });
   return { ok: true };
+});
+
+// ---------------------------------------------------------------- grupos permanentes
+// Grupos de cualquier integrante (conductor o pasajero), siempre dentro de su comunidad. Solo
+// estas funciones escriben `grupos`, sus `miembros`, `enlacesGrupo` y `membresias`; la app lee.
+// `membresias/{uid}` resume los grupos de cada persona (activos y pendientes) para las reglas.
+const MAX_GRUPOS_POR_PERSONA = 30;
+const MAX_MIEMBROS_GRUPO = 50;
+const comunidadDeToken = (req) => {
+  const correo = String(req.auth?.token?.email ?? "").toLowerCase();
+  return correo.endsWith("@tecsup.edu.pe") && req.auth?.token?.email_verified === true ? "tecsup" : "externa";
+};
+const mensajeOtraComunidad = (c) => c === "tecsup"
+  ? "Este grupo es de la comunidad Tecsup: entra con tu correo @tecsup.edu.pe."
+  : "Este grupo es de la comunidad externa: las cuentas de Tecsup no pueden unirse.";
+const refGrupo = (gid) => db.collection("grupos").doc(gid);
+const refMiembro = (gid, uid) => refGrupo(gid).collection("miembros").doc(uid);
+const refMembresia = (uid) => db.collection("membresias").doc(uid);
+const refEnlace = (codigo) => db.collection("enlacesGrupo").doc(codigo);
+const idGrupo = (v) => { const g = String(v ?? ""); if (!/^[A-Za-z0-9]{10,40}$/.test(g)) throw new HttpsError("invalid-argument", "Grupo no válido."); return g; };
+const idPersona = (v) => { const u = String(v ?? ""); if (!/^[A-Za-z0-9_-]{6,128}$/.test(u)) throw new HttpsError("invalid-argument", "Persona no válida."); return u; };
+const codigoEnlace = (v) => { const c = String(v ?? "").trim().toUpperCase(); if (!/^[A-Z0-9]{8}$/.test(c)) throw new HttpsError("invalid-argument", "El enlace de invitación no es válido."); return c; };
+const nombreGrupoValido = (v) => {
+  const n = String(v ?? "").trim().replace(/\s+/g, " ");
+  if (n.length < 3 || n.length > 40) throw new HttpsError("invalid-argument", "El nombre del grupo debe tener entre 3 y 40 caracteres.");
+  return n;
+};
+const enlaceDe = (codigo) => `${DOMINIO_ENLACES}/i/${codigo}`;
+
+async function exigirAdmin(gid, uid) {
+  const [g, m] = await Promise.all([refGrupo(gid).get(), refMiembro(gid, uid).get()]);
+  if (!g.exists) throw new HttpsError("not-found", "Este grupo ya no existe.");
+  if (m.data()?.rol !== "admin" || m.data()?.estado !== "activo") throw new HttpsError("permission-denied", "Solo el administrador del grupo puede hacer esto.");
+  return g.data();
+}
+async function adminsDe(gid) {
+  return (await refGrupo(gid).collection("miembros").where("rol", "==", "admin").get()).docs
+    .filter((d) => d.data().estado === "activo").map((d) => d.id);
+}
+
+exports.crearGrupo = onCall(async (req) => {
+  const uid = exigirSesion(req);
+  const nombreGrupo = nombreGrupoValido(req.data?.nombre);
+  const requiereAprobacion = req.data?.requiereAprobacion !== false;
+  const mem = (await refMembresia(uid).get()).data();
+  if ((mem?.grupos?.length ?? 0) >= MAX_GRUPOS_POR_PERSONA) throw new HttpsError("resource-exhausted", `Puedes estar en ${MAX_GRUPOS_POR_PERSONA} grupos como máximo.`);
+  const ref = db.collection("grupos").doc();
+  const lote = db.batch();
+  lote.set(ref, { nombre: nombreGrupo, comunidad: comunidadDeToken(req), creadorId: uid, requiereAprobacion,
+    codigo: null, miembros: 1, creadoEn: FieldValue.serverTimestamp() });
+  lote.set(ref.collection("miembros").doc(uid), { nombre: await nombreDe(uid), rol: "admin", estado: "activo", unidoEn: FieldValue.serverTimestamp() });
+  lote.set(refMembresia(uid), { grupos: FieldValue.arrayUnion(ref.id) }, { merge: true });
+  await lote.commit();
+  return { grupoId: ref.id };
+});
+
+/** Enlace vigente del grupo para compartir por WhatsApp; con `renovar` crea otro y anula el anterior. */
+exports.enlaceGrupo = onCall(async (req) => {
+  const uid = exigirSesion(req);
+  const gid = idGrupo(req.data?.grupoId);
+  const g = await exigirAdmin(gid, uid);
+  if (g.codigo && !req.data?.renovar && (await refEnlace(g.codigo).get()).data()?.activa) return { codigo: g.codigo, enlace: enlaceDe(g.codigo) };
+  for (let i = 0; i < 5; i++) {
+    const codigo = codigoNuevo();
+    const lote = db.batch();
+    lote.create(refEnlace(codigo), { grupoId: gid, comunidad: g.comunidad, activa: true, creadaPor: uid, creadaEn: FieldValue.serverTimestamp() });
+    if (g.codigo) lote.set(refEnlace(g.codigo), { activa: false }, { merge: true });
+    lote.update(refGrupo(gid), { codigo });
+    try {
+      await lote.commit();
+      return { codigo, enlace: enlaceDe(codigo) };
+    } catch (e) {
+      if (e?.code !== 6) throw e; // ya existe: se prueba otro código
+    }
+  }
+  throw new HttpsError("internal", "No se pudo crear el enlace. Intenta de nuevo.");
+});
+
+exports.desactivarEnlaceGrupo = onCall(async (req) => {
+  const uid = exigirSesion(req);
+  const gid = idGrupo(req.data?.grupoId);
+  const g = await exigirAdmin(gid, uid);
+  const lote = db.batch();
+  if (g.codigo) lote.set(refEnlace(g.codigo), { activa: false }, { merge: true });
+  lote.update(refGrupo(gid), { codigo: null });
+  await lote.commit();
+  return { ok: true };
+});
+
+exports.ajustesGrupo = onCall(async (req) => {
+  const uid = exigirSesion(req);
+  const gid = idGrupo(req.data?.grupoId);
+  await exigirAdmin(gid, uid);
+  const cambios = {};
+  if (req.data?.nombre !== undefined) cambios.nombre = nombreGrupoValido(req.data.nombre);
+  if (req.data?.requiereAprobacion !== undefined) cambios.requiereAprobacion = req.data.requiereAprobacion === true;
+  if (Object.keys(cambios).length) await refGrupo(gid).update(cambios);
+  return { ok: true };
+});
+
+/** Lo que ve la persona invitada antes de aceptar (no la une todavía). */
+exports.verInvitacionGrupo = onCall(async (req) => {
+  const uid = exigirSesion(req);
+  const codigo = codigoEnlace(req.data?.codigo);
+  const e = (await refEnlace(codigo).get()).data();
+  if (!e?.activa) throw new HttpsError("not-found", "Esta invitación ya no es válida. Pide un enlace nuevo.");
+  if (e.comunidad !== comunidadDeToken(req)) throw new HttpsError("permission-denied", mensajeOtraComunidad(e.comunidad));
+  const [g, m] = await Promise.all([refGrupo(e.grupoId).get(), refMiembro(e.grupoId, uid).get()]);
+  if (!g.exists) throw new HttpsError("not-found", "Este grupo ya no existe.");
+  return { grupoId: e.grupoId, nombre: g.data().nombre, miembros: g.data().miembros ?? 0,
+    requiereAprobacion: g.data().requiereAprobacion === true, estado: m.data()?.estado ?? null };
+});
+
+/** La persona invitada acepta: entra al grupo o queda pendiente de la aprobación del administrador. */
+exports.unirseGrupo = onCall(async (req) => {
+  const uid = exigirSesion(req);
+  const codigo = codigoEnlace(req.data?.codigo);
+  const comunidad = comunidadDeToken(req);
+  const yo = await nombreDe(uid);
+  const r = await db.runTransaction(async (tx) => {
+    const e = (await tx.get(refEnlace(codigo))).data();
+    if (!e?.activa) throw new HttpsError("not-found", "Esta invitación ya no es válida. Pide un enlace nuevo.");
+    if (e.comunidad !== comunidad) throw new HttpsError("permission-denied", mensajeOtraComunidad(e.comunidad));
+    const gid = e.grupoId;
+    const [g, m, mem] = await Promise.all([tx.get(refGrupo(gid)), tx.get(refMiembro(gid, uid)), tx.get(refMembresia(uid))]);
+    if (!g.exists) throw new HttpsError("not-found", "Este grupo ya no existe.");
+    const base = { grupoId: gid, nombre: g.data().nombre };
+    if (m.exists && m.data().estado === "invitado") {
+      tx.update(refMiembro(gid, uid), { estado: "activo", unidoEn: FieldValue.serverTimestamp() });
+      tx.update(refGrupo(gid), { miembros: FieldValue.increment(1) });
+      tx.set(refMembresia(uid), { grupos: FieldValue.arrayUnion(gid), invitaciones: FieldValue.arrayRemove(gid) }, { merge: true });
+      return { ...base, estado: "activo", yaEra: false };
+    }
+    if (m.exists) return { ...base, estado: m.data().estado, yaEra: true };
+    if ((mem.data()?.grupos?.length ?? 0) >= MAX_GRUPOS_POR_PERSONA) throw new HttpsError("resource-exhausted", `Puedes estar en ${MAX_GRUPOS_POR_PERSONA} grupos como máximo.`);
+    if ((g.data().miembros ?? 0) >= MAX_MIEMBROS_GRUPO) throw new HttpsError("resource-exhausted", "Este grupo ya está lleno.");
+    const estado = g.data().requiereAprobacion === true ? "pendiente" : "activo";
+    tx.set(refMiembro(gid, uid), { nombre: yo, rol: "miembro", estado, unidoEn: FieldValue.serverTimestamp() });
+    if (estado === "activo") {
+      tx.update(refGrupo(gid), { miembros: FieldValue.increment(1) });
+      tx.set(refMembresia(uid), { grupos: FieldValue.arrayUnion(gid) }, { merge: true });
+    } else {
+      tx.set(refMembresia(uid), { pendientes: FieldValue.arrayUnion(gid) }, { merge: true });
+    }
+    return { ...base, estado, yaEra: false };
+  });
+  if (!r.yaEra) {
+    const quien = nombre(yo, "Alguien");
+    await Promise.all((await adminsDe(r.grupoId)).map((a) => r.estado === "activo"
+      ? avisar(a, `grupo_${r.grupoId}_${uid}`, `Nuevo integrante en ${r.nombre}`, `${quien} se unió con el enlace de invitación.`)
+      : avisar(a, `grupo_${r.grupoId}_${uid}`, `Solicitud para unirse a ${r.nombre}`, `${quien} quiere unirse. Acéptalo o recházalo en el grupo.`)));
+  }
+  return { grupoId: r.grupoId, nombre: r.nombre, estado: r.estado, yaEra: r.yaEra };
+});
+
+exports.responderSolicitudGrupo = onCall(async (req) => {
+  const uid = exigirSesion(req);
+  const gid = idGrupo(req.data?.grupoId);
+  const otro = idPersona(req.data?.uid);
+  const aceptar = req.data?.aceptar === true;
+  const g = await exigirAdmin(gid, uid);
+  await db.runTransaction(async (tx) => {
+    const m = (await tx.get(refMiembro(gid, otro))).data();
+    if (m?.estado !== "pendiente") throw new HttpsError("failed-precondition", "Esta solicitud ya fue respondida.");
+    if (aceptar) {
+      tx.update(refMiembro(gid, otro), { estado: "activo", unidoEn: FieldValue.serverTimestamp() });
+      tx.update(refGrupo(gid), { miembros: FieldValue.increment(1) });
+      tx.set(refMembresia(otro), { grupos: FieldValue.arrayUnion(gid), pendientes: FieldValue.arrayRemove(gid) }, { merge: true });
+    } else {
+      tx.delete(refMiembro(gid, otro));
+      tx.set(refMembresia(otro), { pendientes: FieldValue.arrayRemove(gid) }, { merge: true });
+    }
+  });
+  await avisar(otro, `grupo_${gid}_${otro}`, aceptar ? `Ya eres parte de ${g.nombre}` : `Solicitud a ${g.nombre}`,
+    aceptar ? "El administrador aceptó tu solicitud." : "El administrador no aceptó tu solicitud.");
+  return { ok: true };
+});
+
+exports.retirarMiembroGrupo = onCall(async (req) => {
+  const uid = exigirSesion(req);
+  const gid = idGrupo(req.data?.grupoId);
+  const otro = idPersona(req.data?.uid);
+  if (otro === uid) throw new HttpsError("invalid-argument", "Para irte del grupo usa «Abandonar grupo».");
+  const g = await exigirAdmin(gid, uid);
+  await db.runTransaction(async (tx) => {
+    const m = (await tx.get(refMiembro(gid, otro))).data();
+    if (!m) throw new HttpsError("not-found", "Esta persona ya no está en el grupo.");
+    if (m.rol === "admin") throw new HttpsError("permission-denied", "No puedes retirar a otro administrador.");
+    tx.delete(refMiembro(gid, otro));
+    if (m.estado === "activo") tx.update(refGrupo(gid), { miembros: FieldValue.increment(-1) });
+    tx.set(refMembresia(otro), { grupos: FieldValue.arrayRemove(gid), pendientes: FieldValue.arrayRemove(gid), invitaciones: FieldValue.arrayRemove(gid) }, { merge: true });
+  });
+  await quitarGrupoDeRutas(otro, gid).catch(() => null);
+  await avisar(otro, `grupo_${gid}_${otro}`, `Ya no estás en ${g.nombre}`, "El administrador te retiró del grupo.");
+  return { ok: true };
+});
+
+/**
+ * Sale del grupo. Si era el último administrador, el cargo pasa al integrante más antiguo;
+ * si no queda nadie activo, el grupo se borra (y se cancelan las solicitudes pendientes).
+ */
+async function salirDeGrupo(gid, uid) {
+  const r = await db.runTransaction(async (tx) => {
+    const [g, m, activos] = await Promise.all([tx.get(refGrupo(gid)), tx.get(refMiembro(gid, uid)),
+      tx.get(refGrupo(gid).collection("miembros").where("estado", "==", "activo"))]);
+    tx.set(refMembresia(uid), { grupos: FieldValue.arrayRemove(gid), pendientes: FieldValue.arrayRemove(gid), invitaciones: FieldValue.arrayRemove(gid) }, { merge: true });
+    if (!g.exists || !m.exists) return { quedan: -1 };
+    tx.delete(refMiembro(gid, uid));
+    const resto = activos.docs.filter((d) => d.id !== uid);
+    if (m.data().estado !== "activo") return { quedan: resto.length, nombre: g.data().nombre };
+    if (resto.length) tx.update(refGrupo(gid), { miembros: FieldValue.increment(-1) });
+    let nuevoAdmin = null;
+    if (m.data().rol === "admin" && resto.length && !resto.some((d) => d.data().rol === "admin")) {
+      const mayor = [...resto].sort((a, b) => (a.data().unidoEn?.toMillis?.() ?? 0) - (b.data().unidoEn?.toMillis?.() ?? 0))[0];
+      tx.update(mayor.ref, { rol: "admin" });
+      nuevoAdmin = mayor.id;
+    }
+    return { quedan: resto.length, nuevoAdmin, nombre: g.data().nombre, codigo: g.data().codigo };
+  });
+  if (r.quedan === 0) {
+    const pendientes = await refGrupo(gid).collection("miembros").get();
+    const lote = db.batch();
+    pendientes.docs.forEach((d) => lote.set(refMembresia(d.id), { pendientes: FieldValue.arrayRemove(gid), invitaciones: FieldValue.arrayRemove(gid) }, { merge: true }));
+    if (r.codigo) lote.set(refEnlace(r.codigo), { activa: false }, { merge: true });
+    await lote.commit();
+    await db.recursiveDelete(refGrupo(gid));
+  }
+  await quitarGrupoDeRutas(uid, gid).catch(() => null);
+  if (r.nuevoAdmin) await avisar(r.nuevoAdmin, `grupo_${gid}_admin`, `Ahora administras ${r.nombre}`, "El administrador anterior dejó el grupo.");
+  return r;
+}
+
+exports.salirGrupo = onCall(async (req) => {
+  const uid = exigirSesion(req);
+  const r = await salirDeGrupo(idGrupo(req.data?.grupoId), uid);
+  return { ok: true, grupoBorrado: r.quedan === 0 };
+});
+
+/** Al eliminar la cuenta: sale de todos sus grupos (activos y pendientes). */
+async function salirDeTodosLosGrupos(uid) {
+  const mem = (await refMembresia(uid).get()).data();
+  const ids = [...new Set([...(mem?.grupos ?? []), ...(mem?.pendientes ?? []), ...(mem?.invitaciones ?? [])])];
+  for (const gid of ids) await salirDeGrupo(gid, uid).catch(() => null);
+  await refMembresia(uid).delete();
+}
+
+/**
+ * Quien deja un grupo ya no le comparte sus rutas. Si una ruta se queda sin grupos, pasa a pausa
+ * para que el conductor elija de nuevo con quién compartirla.
+ */
+async function quitarGrupoDeRutas(uid, gid) {
+  const rutas = await db.collection("rutas").where("conductorId", "==", uid).get();
+  for (const r of rutas.docs.filter((d) => (d.data().grupos ?? []).includes(gid))) {
+    const quedan = r.data().grupos.filter((g) => g !== gid);
+    await r.ref.update(quedan.length ? { grupos: quedan } : { grupos: [], estado: "pausada" });
+  }
+}
+
+/** Ids de las rutas activas compartidas solo con mis grupos; la app las lee una por una (las reglas lo permiten). */
+exports.rutasDeMisGrupos = onCall(async (req) => {
+  const uid = exigirSesion(req);
+  const comunidad = comunidadDeToken(req);
+  const grupos = (await refMembresia(uid).get()).data()?.grupos ?? [];
+  const ids = new Set();
+  for (let i = 0; i < grupos.length; i += 30) {
+    const q = await db.collection("rutas").where("grupos", "array-contains-any", grupos.slice(i, i + 30)).get();
+    q.docs.filter((d) => d.data().comunidad === `${comunidad}-grupos` && d.data().estado === "activa").forEach((d) => ids.add(d.id));
+  }
+  return { ids: [...ids] };
+});
+
+// ---------------------------------------------------------------- contactos, bloqueos e invitaciones directas
+const refContacto = (uid, otro) => db.collection("usuarios").doc(uid).collection("contactos").doc(otro);
+const refBloqueo = (de, a) => db.collection("bloqueos").doc(`${de}_${a}`);
+async function hayBloqueo(a, b) {
+  const [x, y] = await Promise.all([refBloqueo(a, b).get(), refBloqueo(b, a).get()]);
+  return x.exists || y.exists;
+}
+async function comunidadDeUid(uid) {
+  const u = await getAuth().getUser(uid).catch(() => null);
+  const correo = String(u?.email ?? "").toLowerCase();
+  return correo.endsWith("@tecsup.edu.pe") && u?.emailVerified === true ? "tecsup" : "externa";
+}
+/** ¿Comparten un grupo activo o un viaje aceptado? Así se agregan contactos sin buscador de personas. */
+async function seConocen(uid, otro) {
+  const [a, b] = await Promise.all([refMembresia(uid).get(), refMembresia(otro).get()]);
+  const mios = a.data()?.grupos ?? [];
+  if ((b.data()?.grupos ?? []).some((g) => mios.includes(g))) return true;
+  const viaje = async (c, p) => !(await db.collection("reservas").where("conductorId", "==", c).where("pasajeroId", "==", p).limit(5).get())
+    .docs.every((d) => d.data().estado !== "aceptada");
+  return (await viaje(uid, otro)) || (await viaje(otro, uid));
+}
+
+exports.agregarContacto = onCall(async (req) => {
+  const uid = exigirSesion(req);
+  const otro = idPersona(req.data?.uid);
+  if (otro === uid) throw new HttpsError("invalid-argument", "No puedes agregarte a ti mismo.");
+  if (await comunidadDeUid(otro) !== comunidadDeToken(req)) throw new HttpsError("permission-denied", "Solo puedes agregar personas de tu comunidad.");
+  if (await hayBloqueo(uid, otro)) throw new HttpsError("permission-denied", "No puedes agregar a esta persona.");
+  if (!(await seConocen(uid, otro))) throw new HttpsError("failed-precondition", "Solo puedes agregar a personas con las que compartes un grupo o un viaje.");
+  const nombreOtro = await nombreDe(otro);
+  await refContacto(uid, otro).set({ nombre: nombreOtro, agregadoEn: FieldValue.serverTimestamp() });
+  return { nombre: nombreOtro };
+});
+
+/** El administrador invita a contactos suyos; cada persona acepta o rechaza en «Mis grupos». */
+exports.invitarContactosGrupo = onCall(async (req) => {
+  const uid = exigirSesion(req);
+  const gid = idGrupo(req.data?.grupoId);
+  const uids = [...new Set(Array.isArray(req.data?.uids) ? req.data.uids : [])].slice(0, 20).map(idPersona);
+  if (!uids.length) throw new HttpsError("invalid-argument", "Elige al menos un contacto.");
+  const g = await exigirAdmin(gid, uid);
+  let invitados = 0;
+  for (const otro of uids) {
+    if (otro === uid || !(await refContacto(uid, otro).get()).exists || await hayBloqueo(uid, otro)) continue;
+    if (await comunidadDeUid(otro) !== g.comunidad) continue;
+    const ok = await db.runTransaction(async (tx) => {
+      const m = await tx.get(refMiembro(gid, otro));
+      if (m.exists) return false;
+      tx.set(refMiembro(gid, otro), { nombre: await nombreDe(otro), rol: "miembro", estado: "invitado", invitadoPor: uid, unidoEn: FieldValue.serverTimestamp() });
+      tx.set(refMembresia(otro), { invitaciones: FieldValue.arrayUnion(gid) }, { merge: true });
+      return true;
+    });
+    if (ok) {
+      invitados++;
+      await avisar(otro, `grupo_${gid}_${otro}`, `Te invitaron a ${g.nombre}`, "Ábrelo en Perfil › Mis grupos para aceptar o rechazar.");
+    }
+  }
+  return { invitados };
+});
+
+exports.responderInvitacionGrupo = onCall(async (req) => {
+  const uid = exigirSesion(req);
+  const gid = idGrupo(req.data?.grupoId);
+  const aceptar = req.data?.aceptar === true;
+  const r = await db.runTransaction(async (tx) => {
+    const [g, m] = await Promise.all([tx.get(refGrupo(gid)), tx.get(refMiembro(gid, uid))]);
+    if (!g.exists || m.data()?.estado !== "invitado") throw new HttpsError("failed-precondition", "Esta invitación ya no está vigente.");
+    if (aceptar) {
+      tx.update(refMiembro(gid, uid), { estado: "activo", unidoEn: FieldValue.serverTimestamp() });
+      tx.update(refGrupo(gid), { miembros: FieldValue.increment(1) });
+      tx.set(refMembresia(uid), { grupos: FieldValue.arrayUnion(gid), invitaciones: FieldValue.arrayRemove(gid) }, { merge: true });
+    } else {
+      tx.delete(refMiembro(gid, uid));
+      tx.set(refMembresia(uid), { invitaciones: FieldValue.arrayRemove(gid) }, { merge: true });
+    }
+    return { nombre: g.data().nombre, invitadoPor: m.data().invitadoPor };
+  });
+  if (aceptar && r.invitadoPor) await avisar(r.invitadoPor, `grupo_${gid}_${uid}`, `Nuevo integrante en ${r.nombre}`,
+    `${nombre(await nombreDe(uid), "Alguien")} aceptó tu invitación.`);
+  return { ok: true, nombre: r.nombre };
 });
