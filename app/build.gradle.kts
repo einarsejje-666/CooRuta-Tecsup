@@ -35,8 +35,8 @@ android {
         applicationId = "pe.cooruta.app"
         minSdk = 29
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 6
+        versionName = "1.4.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -49,6 +49,11 @@ android {
         // Release siempre sin emuladores.
         buildConfigField("boolean", "EMULADOR", "false")
         buildConfigField("String", "EMULADOR_HOST", "\"\"")
+        // Versión para Play Store (gradlew bundleRelease -Pplay): sin actualizador por APK.
+        buildConfigField("boolean", "TIENDA_PLAY", project.hasProperty("play").toString())
+    }
+    if (project.hasProperty("play")) {
+        sourceSets.getByName("release").manifest.srcFile("src/play/AndroidManifest.xml")
     }
 
     signingConfigs {
@@ -107,6 +112,7 @@ dependencies {
     implementation(libs.androidx.credentials)
     implementation(libs.androidx.credentials.play.services.auth)
     implementation(libs.googleid)
+    implementation(libs.play.services.location)
     implementation(libs.maps.compose)
     implementation(libs.retrofit)
     implementation(libs.retrofit.converter.gson)
